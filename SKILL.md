@@ -8,6 +8,24 @@ license: MIT
 
 > **Desarrollado por GTI Santander**
 
+## On invocation: open the menu
+
+When this skill is invoked without a specific request — `/skill-sync` with no arguments,
+"abre skill-sync", "sync my skills" — **tell the user to open the menu, and stop there**:
+
+```
+! python ~/.claude/skills/skill-sync/scripts/menu.py
+```
+
+(Windows: `! python %USERPROFILE%\.claude\skills\skill-sync\scripts\menu.py`)
+
+Do not run `doctor`, `status` or anything else first. The menu shows all of that, and it
+is what the user came for. This holds even if `status`, `push`, or another subcommand ran
+earlier in the same session — a bare `/skill-sync` always points back to the menu, it
+never repeats the last subcommand. Run individual subcommands only when the current
+message asks for that specific thing ("push my skills", "what's out of sync?"), or when
+diagnosing a failure.
+
 Skills live in standard skill locations across the PC (`~/.claude/skills/<name>/`, `~/.gemini/config/skills/<name>/`, `.agents/skills/<name>/`). This skill automatically discovers all skills installed anywhere on the system and keeps them synced to a cloud remote grouped by category:
 
 ```
