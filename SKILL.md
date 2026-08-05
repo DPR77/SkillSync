@@ -11,13 +11,21 @@ license: MIT
 ## On invocation: open the menu
 
 When this skill is invoked without a specific request — `/skill-sync` with no arguments,
-"abre skill-sync", "sync my skills" — **tell the user to open the menu, and stop there**:
+"abre skill-sync", "sync my skills" — **launch the menu in a new terminal window, and stop
+there**. Claude Code's own `!` prefix and tool calls have no real TTY, so `menu.py` refuses
+to run inside them — it needs an actual console window, which a spawned process gets.
 
+Windows (PowerShell tool):
 ```
-! python ~/.claude/skills/skill-sync/scripts/menu.py
+Start-Process powershell -ArgumentList '-NoExit','-Command','python $env:USERPROFILE\.claude\skills\skill-sync\scripts\menu.py'
 ```
 
-(Windows: `! python %USERPROFILE%\.claude\skills\skill-sync\scripts\menu.py`)
+macOS/Linux (Bash tool):
+```
+nohup x-terminal-emulator -e "python3 ~/.claude/skills/skill-sync/scripts/menu.py" >/dev/null 2>&1 &
+```
+(swap `x-terminal-emulator` for whatever terminal the user has — `gnome-terminal`, `konsole`,
+`xterm`, or on macOS `open -a Terminal.app`.)
 
 Do not run `doctor`, `status` or anything else first. The menu shows all of that, and it
 is what the user came for. This holds even if `status`, `push`, or another subcommand ran
@@ -44,14 +52,9 @@ Use `python3` on macOS/Linux if `python` is not on PATH.
 `python scripts/menu.py` opens a full-screen ASCII UI: checkbox skill lists, arrow-key
 navigation, live filter, colour-coded states, and every action behind one screen.
 
-**Claude cannot drive it** — tool calls have no interactive stdin. When the user wants the
-menu, tell them to run it themselves; inside Claude Code that means prefixing with `!`:
-
-```
-! python ~/.claude/skills/skill-sync/scripts/menu.py
-```
-
-Windows: `! python %USERPROFILE%\.claude\skills\skill-sync\scripts\menu.py`
+**Claude cannot drive it** — tool calls and `!` have no interactive stdin. Launch it in a
+spawned terminal window instead (see "On invocation" above) — that process gets a real
+console, so the menu works there.
 
 Keys: arrows move, `space` toggles, `a`/`n`/`i` select all/none/invert, `/` filters,
 `enter` confirms, `esc` goes back, `q` quits, `r` refreshes. Flags: `--ascii` (no

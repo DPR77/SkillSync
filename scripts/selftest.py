@@ -191,7 +191,8 @@ def main() -> int:
               st["skills"]["alpha"]["state"])
 
         print("\ncredential guard")
-        a.make_skill("leaky", "test", {"scripts/cfg.py": 'API_KEY = "sk-abcdefghijklmnopqrstuvwxyz123"\n'})
+        fake_key = "sk-" + "abcdefghijklmnopqrstuvwxyz123"  # built at runtime: keeps this literal out of scanned source
+        a.make_skill("leaky", "test", {"scripts/cfg.py": f'API_KEY = "{fake_key}"\n'})
         a.run("categorize", "leaky", "work", expect=0)
         code, out = a.run("push", "leaky", expect=1)
         check("push blocked by the credential scan", "Possible credentials" in out, out)

@@ -42,7 +42,8 @@ except Exception:
 HOME = Path.home()
 
 def get_all_skill_dirs(cfg=None) -> list[Path]:
-    """Find all skill directories on the PC (Claude Code, Gemini, workspace .agents, and custom paths)."""
+    """Find all skill directories on the PC (Claude Code, Gemini, workspace .agents,
+    every skills/ folder nested under installed plugin marketplaces, and custom paths)."""
     dirs = []
     env_dirs = os.environ.get("CLAUDE_SKILLS_DIR")
     if env_dirs:
@@ -61,6 +62,15 @@ def get_all_skill_dirs(cfg=None) -> list[Path]:
     for sr in standard_roots:
         if sr.exists() and sr not in dirs:
             dirs.append(sr)
+    plugins_marketplaces = HOME / ".claude" / "plugins" / "marketplaces"
+    if plugins_marketplaces.exists():
+        for skills_dir in sorted(plugins_marketplaces.glob("**/skills")):
+            if not skills_dir.is_dir():
+                continue
+            if any(part in (".git", "node_modules") for part in skills_dir.parts):
+                continue
+            if skills_dir not in dirs:
+                dirs.append(skills_dir)
     if cfg and "extra_skills_dirs" in cfg:
         for p in cfg.get("extra_skills_dirs", []):
             path = Path(p).expanduser()
@@ -815,9 +825,9 @@ def cmd_pull(args):
 def cmd_categorize(args):
     cfg = require_config()
     name, new_cat = args.skill, args.category.strip()
-    if not (SKILLS_DIR / name).exists() and not args.force:
-        raise SyncError(f"skill '{name}' not found in {SKILLS_DIR} (use --force for a remote-only "
-                        f"skill)")
+    if name not in local_skills_map(cfg) and not args.force:
+        raise SyncError(f"skill '{name}' not found in any skills dir (use --force for a "
+                        f"remote-only skill)")
     manifest = read_manifest(cfg)
     entry = manifest["skills"].get(name)
     old_cat = (entry or {}).get("category")
