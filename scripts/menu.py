@@ -906,6 +906,25 @@ def screen_setup(term, cfg):
     configured, remotes_raw = refresh_configured()
     active_remote = (cfg or {}).get("remote", "")
 
+    def activate(remote):
+        """Point skill-sync's config at `remote` and auto-push existing local skills."""
+        nonlocal cfg, active_remote
+        term.draw(header(cfg) + ["  " + C.bold(f"Remote: {remote}"), ""])
+        root = term.ask(f"  folder inside remote [{(cfg or {}).get('root', 'ClaudeSkills')}]: ") \
+            or (cfg or {}).get("root", "ClaudeSkills")
+        groups = term.ask(f"  groups [{','.join((cfg or {}).get('categories') or ['work','school','personal'])}]: ") \
+            or ",".join((cfg or {}).get("categories") or ["work", "school", "personal"])
+        run_action(term, "setup",
+                   lambda r=remote, ro=root, gr=groups: sync.cmd_setup(
+                       Namespace(remote=r, root=ro, categories=gr,
+                                 default_category=None, machine=None)))
+        cfg = sync.load_config() or cfg
+        active_remote = (cfg or {}).get("remote", "")
+        run_action(term, "initial push — uploading all local skills",
+                   lambda: sync.cmd_push(Namespace(skills=None, all=True,
+                                                   no_scan=False, dry_run=False,
+                                                   force=False, assume_default=True)))
+
     while True:
         items = []
         for icon, name, ptype, hint, default_name, create_args in PROVIDERS:
@@ -1001,22 +1020,7 @@ def screen_setup(term, cfg):
                     continue
                 remote = picked2[0]["key"]
 
-            term.draw(header(cfg) + ["  " + C.bold(f"Remote: {remote}"), ""])
-            root = term.ask(f"  folder inside remote [{(cfg or {}).get('root', 'ClaudeSkills')}]: ") \
-                or (cfg or {}).get("root", "ClaudeSkills")
-            groups = term.ask(f"  groups [{','.join((cfg or {}).get('categories') or ['work','school','personal'])}]: ") \
-                or ",".join((cfg or {}).get("categories") or ["work", "school", "personal"])
-            run_action(term, "setup",
-                       lambda r=remote, ro=root, gr=groups: sync.cmd_setup(
-                           Namespace(remote=r, root=ro, categories=gr,
-                                     default_category=None, machine=None)))
-            cfg = sync.load_config() or cfg
-            active_remote = (cfg or {}).get("remote", "")
-            # Auto-push all local skills after setup
-            run_action(term, "initial push — uploading all local skills",
-                       lambda: sync.cmd_push(Namespace(skills=None, all=True,
-                                                       no_scan=False, dry_run=False,
-                                                       force=False, assume_default=True)))
+            activate(remote)
             continue
 
         # ── Not configured: run rclone config create ─────────────────────────
@@ -1043,6 +1047,25 @@ def screen_setup(term, cfg):
         except KeyboardInterrupt:
             pass
         configured, remotes_raw = refresh_configured()
+
+        # The OAuth step above only registers the remote with rclone - it does not
+        # yet make it skill-sync's active remote. Activate it now, otherwise the
+        # picker keeps showing the OLD remote as "active" even though the user just
+        # connected a new one (they'd have to notice and select it a second time).
+        new_matches = [r for r in remotes_raw
+                       if p["ptype"] in r.lower()
+                       or (p["default_name"] and p["default_name"] in r.lower())
+                       or p["hint"] in r.lower()]
+        if new_matches:
+            remote = new_matches[0]
+            if len(new_matches) > 1:
+                picked2 = Picker([{"key": r} for r in new_matches], lambda it, ch: it["key"],
+                                 f"Pick the {p['key']} remote to use",
+                                 single=True).run(term, cfg)
+                if not picked2:
+                    continue
+                remote = picked2[0]["key"]
+            activate(remote)
         # loop back to picker
 
 
