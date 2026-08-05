@@ -70,6 +70,7 @@ non-interactive subcommands below — use those yourself.
 | `push [skill...]` (`--json`) | upload changed skills (`--dry-run`, `--force`, `--no-scan`, `--json`) |
 | `pull [category...]` | download; bare `pull` lists what the remote has (`--skills`, `--dest`, `--force`) |
 | `categorize <skill> <category>` | assign a category, moving it on the remote too |
+| `place <skill> <client...>` (`--dest`, `--force`) | copy a local skill into another AI client's skills folder (`claude`, `gemini`, `agents`/`cursor`/`antigravity`/`opencode`) — purely local, no remote involved |
 | `merge <skill>` (`--json`) | inspect Markdown diff and merge conflicts between local and remote |
 | `resolve <skill> --keep local\|remote` | settle a conflict, backing up the losing side |
 | `prune [--yes] [--only ...]` | the only command that deletes on the remote |

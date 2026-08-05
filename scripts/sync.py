@@ -856,6 +856,63 @@ def cmd_categorize(args):
     return 0
 
 
+# claude-code-setup/claude-plugins-official/... clients share ".agents/skills" by
+# convention (README lists Antigravity, Cursor and OpenCode as reading that folder).
+CLIENT_DIRS = {
+    "claude": HOME / ".claude" / "skills",
+    "gemini": HOME / ".gemini" / "config" / "skills",
+    "agents": HOME / ".agents" / "skills",
+    "cursor": HOME / ".agents" / "skills",
+    "antigravity": HOME / ".agents" / "skills",
+    "opencode": HOME / ".agents" / "skills",
+}
+
+
+def cmd_place(args):
+    cfg = load_config()
+    lmap = local_skills_map(cfg)
+    name = args.skill
+    src = lmap.get(name)
+    if not src:
+        raise SyncError(f"skill '{name}' not found in any local skills dir")
+
+    targets = []
+    for c in args.clients:
+        key = c.lower()
+        if key not in CLIENT_DIRS:
+            raise SyncError(f"unknown client '{c}' - known: {', '.join(sorted(set(CLIENT_DIRS)))} "
+                            f"(or pass --dest <folder> for anything else)")
+        targets.append((key, CLIENT_DIRS[key]))
+    if args.dest:
+        targets.append((args.dest, Path(args.dest).expanduser()))
+    if not targets:
+        raise SyncError("give at least one client (claude, gemini, agents, cursor, "
+                        "antigravity, opencode) or --dest <folder>")
+
+    placed = []
+    for label, dest_root in targets:
+        dst = dest_root / name
+        if dst.resolve() == src.resolve():
+            print(f"skip {label}: {name} is already there")
+            continue
+        dest_root.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            if not args.force:
+                print(f"skip {label}: {name} already exists there (use --force to overwrite)")
+                continue
+            backup = TRASH_DIR / stamp() / label / name
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dst), str(backup))
+        shutil.copytree(src, dst)
+        placed.append((label, dst))
+        print(f"placed {name} -> {label} ({dst})")
+
+    if placed:
+        print("Restart the target client(s) so they discover the skill.")
+    log(f"place {name} -> {[l for l, _ in placed]}")
+    return 0 if placed or not targets else 1
+
+
 def cmd_resolve(args):
     cfg = require_config()
     name = args.skill
@@ -1173,6 +1230,14 @@ def build_parser():
     s.add_argument("category")
     s.add_argument("--force", action="store_true", help="allow a remote-only skill")
     s.set_defaults(func=cmd_categorize)
+
+    s = sub.add_parser("place", help="copy a local skill into another AI client's skills folder")
+    s.add_argument("skill")
+    s.add_argument("clients", nargs="*",
+                   help="claude, gemini, agents (cursor/antigravity/opencode share this dir)")
+    s.add_argument("--dest", help="custom destination folder instead of/besides a client name")
+    s.add_argument("--force", action="store_true", help="overwrite an existing copy at the destination")
+    s.set_defaults(func=cmd_place)
 
     s = sub.add_parser("resolve", help="resolve a conflict, keeping one side")
     s.add_argument("skill")
