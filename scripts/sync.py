@@ -851,7 +851,11 @@ def pull_skill(cfg, name, category, dest_root: Path, dry_run=False):
     if dry_run:
         args.append("--dry-run")
     with Spinner(f"downloading {name}"):
-        rclone(args, timeout=1800)
+        code, out, err = rclone(args, timeout=1800, check=False)
+        if code != 0:
+            if "directory not found" in err.lower() or "directory not found" in out.lower():
+                raise SyncError("directory not found on remote")
+            raise SyncError(f"rclone failed ({code}): {err.strip() or out.strip()}")
     return dst
 
 
@@ -1429,21 +1433,27 @@ def cmd_pull(args):
                 progress_bar(idx - 1, total_wanted, f"{category}/{name} -> {dest_root}")
             else:
                 print(f"pull [{idx}/{total_wanted}] {category}/{name} -> {dest_root}")
-            pull_skill(cfg, name, category, dest_root, dry_run=args.dry_run)
-            if _interactive():
-                progress_bar(idx, total_wanted, f"{name} done")
-            return (name, category, dest_root)
+            try:
+                pull_skill(cfg, name, category, dest_root, dry_run=args.dry_run)
+                if _interactive():
+                    progress_bar(idx, total_wanted, f"{name} done")
+                return (name, category, dest_root)
+            except Exception as e:
+                print(f"skipped {name}: {e}")
+                return None
 
         if threads > 1 and len(pull_tasks) > 1:
             with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
                 futures = [executor.submit(_do_pull_item, idx, name, cat, dest) for idx, name, cat, dest in pull_tasks]
                 for fut in concurrent.futures.as_completed(futures):
                     res = fut.result()
-                    pulled.append(res)
+                    if res is not None:
+                        pulled.append(res)
         else:
             for idx, name, cat, dest in pull_tasks:
                 res = _do_pull_item(idx, name, cat, dest)
-                pulled.append(res)
+                if res is not None:
+                    pulled.append(res)
 
         for name in conflicts:
             print(f"CONFLICT: {name}  -> python sync.py resolve {name} --keep local|remote")
