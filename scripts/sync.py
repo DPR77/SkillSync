@@ -742,6 +742,8 @@ def compute_status(cfg, manifest=None):
     lmap = local_skills_map(cfg)
     scanned = 0
     for name, skill_dir in lmap.items():
+        if is_self(name):
+            continue
         # Hashing every skill takes a visible moment the first time, before the cache is
         # warm. Say what is happening rather than freezing on a blank screen.
         scanned += 1
@@ -766,7 +768,7 @@ def compute_status(cfg, manifest=None):
         result[name] = info
 
     for name, rem in remote_skills.items():
-        if name in result:
+        if is_self(name) or name in result:
             continue
         result[name] = {
             "name": name, "local": False, "local_path": None, "remote": True,
