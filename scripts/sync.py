@@ -596,6 +596,28 @@ def save_fp_cache():
             pass
 
 
+def detect_native_origin(path: Path | str | None) -> tuple[str, str]:
+    """Detect the native platform origin of a skill based on its file path."""
+    if not path:
+        return ("custom", "👤 [Custom]")
+    p_str = str(path).replace("\\", "/").lower()
+    if "/.claude/plugins/marketplaces/" in p_str:
+        return ("claude-code-plugin", "💬 [Claude Plugin]")
+    if "/.claude/skills/" in p_str:
+        return ("claude-code", "💬 [Claude Native]")
+    if "/.gemini/" in p_str:
+        return ("gemini", "🤖 [Gemini Native]")
+    if "/.cursor/" in p_str:
+        return ("cursor", "⚡ [Cursor Native]")
+    if "/.openclaw/" in p_str:
+        return ("openclaw", "🦅 [OpenClaw Native]")
+    if "/.codex/" in p_str:
+        return ("codex", "🧠 [Codex Native]")
+    if "/.agents/" in p_str:
+        return ("agents", "🌐 [Global Agents]")
+    return ("custom", "👤 [Custom]")
+
+
 def is_self(name: str) -> bool:
     return name == SELF_NAME
 
@@ -754,8 +776,10 @@ def compute_status(cfg, manifest=None):
         cats = entry_categories(rem) or list(prev.get("categories") or [])
         if not cats and prev.get("category"):
             cats = [prev["category"]]
+        origin, badge = detect_native_origin(skill_dir)
         info = {
             "name": name, "local": True, "local_path": str(skill_dir), "remote": bool(rem),
+            "native_origin": origin, "origin_badge": badge,
             "category": (rem or {}).get("category") or prev.get("category"),
             "categories": cats,
             "local_hash": fp, "remote_hash": (rem or {}).get("hash"),
@@ -900,12 +924,15 @@ def primary_category(entry, fallback=None):
     return cats[0] if cats else fallback
 
 
-def manifest_entry(cfg, category, fp, size, files, categories=None):
+def manifest_entry(cfg, category, fp, size, files, categories=None, native_origin=None):
     cats = [c for c in (categories or [category]) if c]
     if category and category not in cats:
         cats.insert(0, category)
-    return {"category": category, "categories": cats, "hash": fp, "size": size,
-            "files": files, "updated_at": now_iso(), "machine": cfg["machine"]}
+    entry = {"category": category, "categories": cats, "hash": fp, "size": size,
+             "files": files, "updated_at": now_iso(), "machine": cfg["machine"]}
+    if native_origin:
+        entry["native_origin"] = native_origin
+    return entry
 
 
 STAMP_RE = re.compile(r"(\d{8}-\d{6})")
@@ -1882,8 +1909,45 @@ def changed_since_state():
     return changed
 
 
+def spawn_confirm_window():
+    """Pop a real, separate console window running `confirm-new` (best-effort).
+
+    A Stop hook has no stdin the user can type into, and blocking Stop only reaches
+    the user if they're mid-conversation. A detached window with a real y/n prompt
+    works either way and doesn't depend on Claude relaying anything.
+    """
+    script = str(Path(__file__).resolve())
+    try:
+        if os.name == "nt":
+            subprocess.Popen(
+                ["cmd", "/c", "start", "skill-sync: new skills", "cmd", "/k",
+                 sys.executable, script, "confirm-new"],
+                close_fds=True,
+            )
+        else:
+            for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
+                path = shutil.which(term)
+                if path:
+                    subprocess.Popen([path, "-e", sys.executable, script, "confirm-new"],
+                                      close_fds=True)
+                    break
+        return True
+    except Exception as e:
+        log(f"spawn_confirm_window failed: {e!r}")
+        return False
+
+
 def cmd_hook_stop(args):
-    """Auto-push on session end. Must be fast, silent and never break the session."""
+    """Auto-push skills already tracked in sync state; ask before pushing brand-new ones.
+
+    A skill with no entry in state.json has never been synced anywhere - silently
+    uploading it the first time is exactly what "detect it and ask me" was meant to
+    avoid. Those get surfaced once via a separate console window (see
+    spawn_confirm_window/cmd_confirm_new) with a real y/n prompt, so the hook itself
+    never decides on its own and never has to guess whether anyone is watching chat.
+    Skills already known to state (an edit to something already synced) keep
+    auto-pushing as before - that direction was never the complaint.
+    """
     cfg = load_config()
     if not cfg or not shutil.which("rclone"):
         return 0
@@ -1892,22 +1956,129 @@ def cmd_hook_stop(args):
     changed = changed_since_state()
     if not changed:
         return 0
-    sizes = {n: (skill_path(n, cfg) and fingerprint_cached(skill_path(n, cfg))[3]) or 0
-             for n in changed}
-    changed.sort(key=lambda n: sizes[n])
-    # Closing a session must not hang on a slow link. Smallest first, within a budget;
-    # whatever does not fit is named in the log and goes up next time.
-    budget = float(cfg.get("hook_budget_seconds") or HOOK_BUDGET_SECONDS)
-    ns = argparse.Namespace(skills=changed, dry_run=False, force=False, no_scan=False,
-                            json=False, deadline=time.monotonic() + budget,
+
+    st = load_state()
+    already_notified = set(st.get("notified_new", []))
+    brand_new = [n for n in changed if n not in st["skills"]]
+    ask_now = [n for n in brand_new if n not in already_notified]
+    updated = [n for n in changed if n not in brand_new]
+
+    if updated:
+        sizes = {n: (skill_path(n, cfg) and fingerprint_cached(skill_path(n, cfg))[3]) or 0
+                 for n in updated}
+        updated.sort(key=lambda n: sizes[n])
+        # Closing a session must not hang on a slow link. Smallest first, within a budget;
+        # whatever does not fit is named in the log and goes up next time.
+        budget = float(cfg.get("hook_budget_seconds") or HOOK_BUDGET_SECONDS)
+        ns = argparse.Namespace(skills=updated, dry_run=False, force=False, no_scan=False,
+                                json=False, deadline=time.monotonic() + budget,
+                                assume_default=bool(cfg.get("auto_default_category", True)))
+        try:
+            cmd_push(ns)
+        except SyncError as e:
+            print(f"[skill-sync] auto-upload skipped: {str(e).splitlines()[0]}", file=sys.stderr)
+            log(f"hook-stop error: {e}")
+        except Exception as e:                                   # never break the session
+            log(f"hook-stop unexpected error: {e!r}")
+
+    if ask_now:
+        # Mark notified before the window even opens: the window is the source of
+        # truth for what gets pushed from here on, this flag only stops the hook
+        # from popping a new window on every single Stop event.
+        st["notified_new"] = sorted(already_notified | set(ask_now))
+        save_json(STATE_FILE, st)
+        if not spawn_confirm_window():
+            names = ", ".join(sorted(ask_now))
+            print(
+                f"[skill-sync] {len(ask_now)} new local skill(s) not yet synced anywhere: "
+                f"{names}. Run `python \"{script_path()}\" confirm-new` to review and push them.",
+                file=sys.stderr,
+            )
+    return 0
+
+
+def script_path() -> str:
+    return str(Path(__file__).resolve())
+
+
+def skill_description(skill_dir: Path) -> str:
+    """Best-effort one-line description pulled from SKILL.md frontmatter."""
+    try:
+        text = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    m = re.search(r"^---\s*$(.*?)^---\s*$", text, re.MULTILINE | re.DOTALL)
+    body = m.group(1) if m else text[:400]
+    m = re.search(r"^description:\s*(.*)$", body, re.MULTILINE)
+    if not m:
+        return ""
+    value = m.group(1).strip()
+    if value in (">", "|", ">-", "|-"):
+        # Folded/literal block scalar: collect the indented lines that follow.
+        lines = []
+        for line in body.split(value, 1)[1].splitlines()[1:]:
+            if not line.strip():
+                break
+            if not line.startswith((" ", "\t")):
+                break
+            lines.append(line.strip())
+        value = " ".join(lines)
+    return value.strip('"\' ').replace("  ", " ")[:220]
+
+
+def cmd_confirm_new(args):
+    """Interactive: list never-synced local skills and ask, one by one, to push or skip.
+
+    Meant to run in its own console window (spawn_confirm_window does that), but works
+    fine run directly too: `python sync.py confirm-new`.
+    """
+    cfg = require_config()
+    st = load_state()
+    lmap = {n: p for n, p in local_skills_map(cfg).items() if not is_self(n)}
+    pending = sorted(n for n in lmap if n not in st["skills"])
+
+    def pause(msg):
+        try:
+            input(msg)
+        except EOFError:
+            pass
+
+    print("=== skill-sync: skills nuevas sin sincronizar ===\n")
+    if not pending:
+        print("No hay ninguna pendiente.")
+        pause("\nPulsa Enter para cerrar...")
+        return 0
+
+    to_push = []
+    for name in pending:
+        desc = skill_description(lmap[name])
+        print(f"- {name}")
+        if desc:
+            print(f"    {desc}")
+        try:
+            ans = input("  Subir esta skill? [s/N]: ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans in ("s", "si", "sí", "y", "yes"):
+            to_push.append(name)
+        print()
+
+    st["notified_new"] = sorted(set(st.get("notified_new", [])) | set(pending))
+    save_json(STATE_FILE, st)
+
+    if not to_push:
+        print("Nada seleccionado, no se sube nada.")
+        pause("\nPulsa Enter para cerrar...")
+        return 0
+
+    ns = argparse.Namespace(skills=to_push, dry_run=False, force=False, no_scan=False,
+                            json=False, deadline=None,
                             assume_default=bool(cfg.get("auto_default_category", True)))
     try:
         cmd_push(ns)
     except SyncError as e:
-        print(f"[skill-sync] auto-upload skipped: {str(e).splitlines()[0]}", file=sys.stderr)
-        log(f"hook-stop error: {e}")
-    except Exception as e:                                   # never break the session
-        log(f"hook-stop unexpected error: {e!r}")
+        print(f"\nError subiendo: {e}")
+    pause("\nListo. Pulsa Enter para cerrar...")
     return 0
 
 
@@ -2104,6 +2275,9 @@ def build_parser():
     s.add_argument("--quiet", action="store_true")
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_hook_session_start)
+
+    s = sub.add_parser("confirm-new", help="interactively review and push never-synced skills")
+    s.set_defaults(func=cmd_confirm_new)
 
     return p
 

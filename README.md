@@ -214,8 +214,14 @@ or replacing its code mid-pull, is not worth the trouble. It updates from GitHub
 4. **Record.** `manifest.json` is re-read and merged before every write, so a machine that
    synced in the meantime keeps its entry. An interrupted upload records whatever already
    landed and resumes next time.
-5. **Repeat, automatically.** The Stop hook uploads what changed at the end of a session,
-   within a 90-second budget, smallest first, so closing a session is never held up.
+5. **Repeat, automatically — but ask about brand-new skills.** The Stop hook auto-uploads
+   edits to skills that have synced before, within a 90-second budget, smallest first, so
+   closing a session is never held up. A skill that has never been synced anywhere is
+   different: the hook does not push it silently. It blocks the Stop event once (exit code
+   2) with a message naming the new skill(s), so Claude relays the question to you instead
+   of deciding on its own. Say yes and it runs `sync.py push <name>`; say no (or ignore it)
+   and it simply won't ask again for that skill unless it changes further — push it manually
+   anytime with `/skill-sync push <name>`.
 
 ---
 
