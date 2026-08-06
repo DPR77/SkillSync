@@ -1986,9 +1986,7 @@ def cmd_update(args):
                 for item in root_sub.iterdir():
                     dst = target_dir / item.name
                     if item.is_dir():
-                        if dst.exists():
-                            shutil.rmtree(dst)
-                        shutil.copytree(item, dst)
+                        shutil.copytree(item, dst, dirs_exist_ok=True)
                     else:
                         shutil.copy2(item, dst)
     except zipfile.BadZipFile:
