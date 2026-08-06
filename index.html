@@ -4,30 +4,35 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>skill-sync — Multi-Machine AI Skill Synchronization</title>
-  <meta name="description" content="Sync AI agent skills between machines and AI clients (Claude Code, Gemini, Antigravity, Cursor, Codex). Developed by GTI Santander.">
+  <meta name="description" content="Sync AI skills between computers and AI clients (Claude Code, Gemini, Antigravity, Cursor, Codex). Crafted by GTI Santander.">
   
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
 
   <style>
     :root {
-      --bg-dark: #08090d;
-      --bg-surface: #0f1219;
-      --bg-surface-hover: #161b26;
-      --border: rgba(255, 255, 255, 0.08);
-      --border-strong: rgba(255, 255, 255, 0.16);
+      --bg-dark: #07090e;
+      --bg-surface: #0e121a;
+      --bg-surface-hover: #151b27;
+      --border-subtle: rgba(255, 255, 255, 0.07);
+      --border-strong: rgba(255, 255, 255, 0.15);
+      --border-accent: rgba(99, 102, 241, 0.35);
       --accent-indigo: #6366f1;
-      --accent-indigo-glow: rgba(99, 102, 241, 0.2);
-      --accent-teal: #14b8a6;
+      --accent-indigo-glow: rgba(99, 102, 241, 0.22);
       --accent-emerald: #10b981;
+      --accent-emerald-glow: rgba(16, 185, 129, 0.2);
+      --accent-cyan: #06b6d4;
+      --accent-amber: #f59e0b;
+      --accent-purple: #8b5cf6;
       --text-main: #f8fafc;
       --text-muted: #94a3b8;
       --text-dim: #64748b;
       --code-bg: #030712;
       --radius-sm: 8px;
       --radius-md: 14px;
-      --radius-lg: 20px;
+      --radius-lg: 22px;
+      --transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     }
 
     * {
@@ -45,54 +50,54 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    /* Ambient background grid & glow */
+    /* Ambient Architectural Grid */
     .bg-grid {
       position: fixed;
       inset: 0;
       background-image: 
         linear-gradient(to right, rgba(255,255,255,0.02) 1px, transparent 1px),
         linear-gradient(to bottom, rgba(255,255,255,0.02) 1px, transparent 1px);
-      background-size: 40px 40px;
+      background-size: 48px 48px;
       pointer-events: none;
       z-index: -2;
     }
 
-    .bg-glow {
+    .bg-glow-top {
       position: fixed;
-      top: -200px;
+      top: -250px;
       left: 50%;
       transform: translateX(-50%);
-      width: 1000px;
-      height: 700px;
-      background: radial-gradient(circle, rgba(99, 102, 241, 0.14) 0%, rgba(20, 184, 166, 0.08) 35%, transparent 70%);
+      width: 1100px;
+      height: 750px;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.16) 0%, rgba(20, 184, 166, 0.08) 35%, transparent 70%);
       pointer-events: none;
       z-index: -1;
     }
 
     .container {
-      max-width: 1160px;
+      max-width: 1180px;
       margin: 0 auto;
-      padding: 0 24px;
+      padding: 0 28px;
     }
 
     /* Header Navigation */
     header {
-      border-bottom: 1px solid var(--border);
-      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border-subtle);
+      backdrop-filter: blur(20px);
       position: sticky;
       top: 0;
       z-index: 100;
-      background: rgba(8, 9, 13, 0.85);
+      background: rgba(7, 9, 14, 0.88);
     }
 
-    .nav-content {
+    .nav-wrapper {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      height: 72px;
+      height: 76px;
     }
 
-    .brand {
+    .brand-link {
       display: flex;
       align-items: center;
       gap: 12px;
@@ -100,40 +105,40 @@
       color: var(--text-main);
     }
 
-    .brand-icon {
-      background: linear-gradient(135deg, var(--accent-indigo), var(--accent-teal));
-      width: 36px;
-      height: 36px;
+    .brand-badge {
+      background: linear-gradient(135deg, var(--accent-indigo), var(--accent-cyan));
+      width: 38px;
+      height: 38px;
       border-radius: var(--radius-sm);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 1.1rem;
-      box-shadow: 0 0 20px var(--accent-indigo-glow);
+      font-size: 1.15rem;
+      box-shadow: 0 0 24px var(--accent-indigo-glow);
     }
 
     .brand-title {
-      font-family: 'Space Grotesk', sans-serif;
-      font-weight: 700;
-      font-size: 1.3rem;
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 1.35rem;
       letter-spacing: -0.02em;
     }
 
-    .nav-items {
+    .nav-links {
       display: flex;
       align-items: center;
-      gap: 28px;
+      gap: 32px;
     }
 
-    .nav-link {
+    .nav-item {
       color: var(--text-muted);
       text-decoration: none;
       font-size: 0.9rem;
       font-weight: 500;
-      transition: color 0.2s;
+      transition: var(--transition);
     }
 
-    .nav-link:hover {
+    .nav-item:hover {
       color: var(--text-main);
     }
 
@@ -141,7 +146,7 @@
       background: var(--bg-surface);
       border: 1px solid var(--border-strong);
       color: var(--text-main);
-      padding: 8px 18px;
+      padding: 9px 20px;
       border-radius: var(--radius-sm);
       font-size: 0.875rem;
       font-weight: 600;
@@ -149,158 +154,187 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      transition: all 0.2s;
+      transition: var(--transition);
     }
 
     .btn-github:hover {
       background: var(--bg-surface-hover);
       border-color: var(--accent-indigo);
-      transform: translateY(-1px);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
     }
 
     /* Hero Section */
     .hero {
-      padding: 90px 0 70px;
+      padding: 100px 0 75px;
       text-align: center;
     }
 
-    .eyebrow-badge {
+    .eyebrow {
       display: inline-flex;
       align-items: center;
       gap: 10px;
-      background: rgba(99, 102, 241, 0.1);
-      border: 1px solid rgba(99, 102, 241, 0.3);
-      color: #818cf8;
-      padding: 6px 18px;
-      border-radius: 30px;
+      background: rgba(99, 102, 241, 0.08);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      color: #a5b4fc;
+      padding: 7px 20px;
+      border-radius: 40px;
       font-size: 0.85rem;
       font-weight: 600;
-      letter-spacing: 0.03em;
-      margin-bottom: 24px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-bottom: 28px;
     }
 
-    .eyebrow-badge a {
-      color: var(--accent-teal);
+    .eyebrow a {
+      color: var(--accent-emerald);
       text-decoration: none;
+      font-weight: 700;
     }
-    .eyebrow-badge a:hover {
+    .eyebrow a:hover {
       text-decoration: underline;
     }
 
-    .hero-heading {
-      font-family: 'Space Grotesk', sans-serif;
-      font-size: 3.8rem;
-      font-weight: 700;
-      line-height: 1.1;
-      letter-spacing: -0.03em;
+    .hero-title {
+      font-family: 'Syne', sans-serif;
+      font-size: 4rem;
+      font-weight: 800;
+      line-height: 1.08;
+      letter-spacing: -0.035em;
       margin-bottom: 24px;
       background: linear-gradient(180deg, #ffffff 0%, #cbd5e1 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
 
-    .hero-description {
+    .hero-subtitle {
       font-size: 1.25rem;
       color: var(--text-muted);
-      max-width: 720px;
-      margin: 0 auto 40px;
+      max-width: 760px;
+      margin: 0 auto 44px;
       font-weight: 400;
+      line-height: 1.65;
     }
 
-    /* Terminal Command Box */
+    /* Installation Box */
     .install-box {
       background: var(--code-bg);
       border: 1px solid var(--border-strong);
       border-radius: var(--radius-md);
-      padding: 16px 24px;
-      max-width: 620px;
-      margin: 0 auto 60px;
+      padding: 18px 26px;
+      max-width: 640px;
+      margin: 0 auto 70px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7), 0 0 30px var(--accent-indigo-glow);
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8), 0 0 35px var(--accent-indigo-glow);
     }
 
-    .install-code {
+    .install-cmd {
       font-family: 'Fira Code', monospace;
-      font-size: 1rem;
-      color: var(--accent-teal);
+      font-size: 1.05rem;
+      color: var(--accent-emerald);
     }
 
-    .install-code span {
+    .install-cmd span {
       color: var(--text-dim);
     }
 
     .btn-copy {
       background: rgba(255, 255, 255, 0.08);
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-subtle);
       color: var(--text-main);
-      padding: 8px 16px;
+      padding: 9px 18px;
       border-radius: var(--radius-sm);
       font-size: 0.85rem;
       font-weight: 600;
       cursor: pointer;
-      transition: all 0.2s;
+      transition: var(--transition);
     }
 
     .btn-copy:hover {
       background: var(--accent-indigo);
       border-color: var(--accent-indigo);
+      color: #fff;
     }
 
-    /* Interactive Live Demo Visualizer */
-    .demo-container {
+    /* Toast Notification */
+    .toast {
+      position: fixed;
+      bottom: 30px;
+      right: 30px;
+      background: var(--accent-emerald);
+      color: #000;
+      font-weight: 700;
+      padding: 12px 24px;
+      border-radius: var(--radius-sm);
+      font-size: 0.9rem;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      opacity: 0;
+      transform: translateY(20px);
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      pointer-events: none;
+      z-index: 1000;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Interactive Simulation Canvas */
+    .sim-card {
       background: var(--bg-surface);
       border: 1px solid var(--border-strong);
       border-radius: var(--radius-lg);
       overflow: hidden;
-      max-width: 900px;
-      margin: 0 auto 100px;
-      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8);
+      max-width: 940px;
+      margin: 0 auto 110px;
+      box-shadow: 0 30px 70px rgba(0, 0, 0, 0.85);
     }
 
-    .demo-bar {
-      background: rgba(0,0,0,0.4);
-      padding: 14px 20px;
+    .sim-header {
+      background: rgba(0,0,0,0.5);
+      padding: 16px 24px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid var(--border-subtle);
     }
 
-    .demo-controls {
+    .sim-tabs {
       display: flex;
       gap: 8px;
     }
 
-    .demo-btn {
+    .sim-tab {
       background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-subtle);
       color: var(--text-muted);
-      padding: 6px 14px;
+      padding: 7px 16px;
       border-radius: 6px;
-      font-size: 0.8rem;
+      font-size: 0.825rem;
       font-weight: 600;
       cursor: pointer;
-      transition: all 0.2s;
+      transition: var(--transition);
     }
 
-    .demo-btn.active {
+    .sim-tab.active {
       background: var(--accent-indigo);
       color: #fff;
       border-color: var(--accent-indigo);
     }
 
-    .demo-body {
-      padding: 28px;
+    .sim-body {
+      padding: 32px;
       font-family: 'Fira Code', monospace;
-      font-size: 0.9rem;
+      font-size: 0.925rem;
     }
 
     .status-table {
       width: 100%;
       border-collapse: collapse;
-      margin-top: 16px;
+      margin-top: 18px;
     }
 
     .status-table th {
@@ -308,181 +342,224 @@
       color: var(--text-dim);
       font-size: 0.75rem;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--border);
+      letter-spacing: 0.06em;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border-subtle);
     }
 
     .status-table td {
-      padding: 12px 0;
+      padding: 14px 0;
       border-bottom: 1px solid rgba(255,255,255,0.04);
     }
 
-    .badge-state {
-      padding: 3px 10px;
+    .state-badge {
+      padding: 4px 12px;
       border-radius: 4px;
-      font-size: 0.75rem;
+      font-size: 0.775rem;
       font-weight: 600;
     }
 
-    .state-insync { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-    .state-newer { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
-    .state-remote { background: rgba(139, 92, 246, 0.15); color: #c084fc; }
+    .state-insync { background: rgba(16, 185, 129, 0.16); color: #34d399; }
+    .state-newer { background: rgba(245, 158, 11, 0.16); color: #fbbf24; }
+    .state-remote { background: rgba(139, 92, 246, 0.16); color: #c084fc; }
 
-    /* Features Grid */
-    .section-header {
+    .sim-actions {
+      margin-top: 24px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .sim-btn {
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-main);
+      padding: 8px 16px;
+      border-radius: var(--radius-sm);
+      font-size: 0.825rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .sim-btn:hover {
+      background: rgba(255, 255, 255, 0.14);
+    }
+
+    .sim-btn-primary {
+      background: var(--accent-indigo);
+      border-color: var(--accent-indigo);
+    }
+    .sim-btn-primary:hover {
+      background: #4f46e5;
+    }
+
+    .sim-output {
+      margin-top: 18px;
+      padding: 12px 16px;
+      background: rgba(0,0,0,0.4);
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-subtle);
+      color: var(--accent-emerald);
+      font-size: 0.85rem;
+      min-height: 42px;
+    }
+
+    /* Grid Section */
+    .section-head {
       text-align: center;
-      margin-bottom: 56px;
+      margin-bottom: 60px;
     }
 
     .section-title {
-      font-family: 'Space Grotesk', sans-serif;
-      font-size: 2.4rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      margin-bottom: 12px;
+      font-family: 'Syne', sans-serif;
+      font-size: 2.5rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      margin-bottom: 14px;
     }
 
     .section-desc {
       color: var(--text-muted);
-      font-size: 1.1rem;
-      max-width: 600px;
+      font-size: 1.15rem;
+      max-width: 640px;
       margin: 0 auto;
     }
 
-    .grid-features {
+    .features-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
       gap: 28px;
-      margin-bottom: 100px;
+      margin-bottom: 110px;
     }
 
-    .feature-card {
+    .card-feature {
       background: var(--bg-surface);
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-subtle);
       border-radius: var(--radius-md);
-      padding: 32px;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      padding: 34px;
+      transition: var(--transition);
     }
 
-    .feature-card:hover {
+    .card-feature:hover {
       border-color: var(--border-strong);
-      transform: translateY(-4px);
-      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+      transform: translateY(-5px);
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
     }
 
-    .feature-icon-box {
-      width: 48px;
-      height: 48px;
+    .feature-icon-badge {
+      width: 50px;
+      height: 50px;
       border-radius: var(--radius-sm);
       background: rgba(99, 102, 241, 0.1);
-      border: 1px solid rgba(99, 102, 241, 0.2);
+      border: 1px solid rgba(99, 102, 241, 0.25);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 1.4rem;
-      margin-bottom: 20px;
+      font-size: 1.5rem;
+      margin-bottom: 22px;
     }
 
-    .feature-heading {
-      font-size: 1.2rem;
+    .feature-title {
+      font-size: 1.25rem;
       font-weight: 700;
       margin-bottom: 12px;
     }
 
-    .feature-text {
+    .feature-desc {
       color: var(--text-muted);
-      font-size: 0.95rem;
-      line-height: 1.6;
+      font-size: 0.96rem;
+      line-height: 1.65;
     }
 
-    /* Clients Grid */
+    /* Client Matrix */
     .clients-card {
       background: var(--bg-surface);
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-subtle);
       border-radius: var(--radius-lg);
-      padding: 48px;
-      margin-bottom: 100px;
+      padding: 54px 40px;
+      margin-bottom: 110px;
       text-align: center;
     }
 
-    .clients-wrapper {
+    .clients-grid {
       display: flex;
       flex-wrap: wrap;
       justify-content: center;
-      gap: 16px;
-      margin-top: 32px;
+      gap: 18px;
+      margin-top: 36px;
     }
 
-    .client-tag {
+    .client-badge {
       background: rgba(255, 255, 255, 0.03);
       border: 1px solid var(--border-strong);
-      padding: 12px 24px;
+      padding: 14px 28px;
       border-radius: 40px;
       font-size: 0.95rem;
       font-weight: 600;
       display: flex;
       align-items: center;
-      gap: 10px;
-      transition: all 0.2s;
+      gap: 12px;
+      transition: var(--transition);
     }
 
-    .client-tag:hover {
+    .client-badge:hover {
       border-color: var(--accent-indigo);
-      transform: scale(1.03);
+      transform: scale(1.04);
+      background: rgba(99, 102, 241, 0.1);
     }
 
-    /* CLI Reference Tabs */
-    .cli-box {
+    /* Interactive CLI Tabs */
+    .cli-card {
       background: var(--code-bg);
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-subtle);
       border-radius: var(--radius-md);
       overflow: hidden;
-      margin-bottom: 100px;
+      margin-bottom: 110px;
     }
 
-    .cli-header {
+    .cli-nav {
       background: rgba(255,255,255,0.03);
-      padding: 14px 20px;
+      padding: 14px 24px;
       display: flex;
-      gap: 12px;
-      border-bottom: 1px solid var(--border);
+      gap: 10px;
+      border-bottom: 1px solid var(--border-subtle);
       overflow-x: auto;
     }
 
-    .cli-tab {
+    .cli-tab-btn {
       background: transparent;
       border: none;
       color: var(--text-muted);
       font-family: 'Fira Code', monospace;
-      font-size: 0.85rem;
-      padding: 6px 14px;
+      font-size: 0.875rem;
+      padding: 7px 16px;
       border-radius: 6px;
       cursor: pointer;
-      transition: all 0.2s;
+      transition: var(--transition);
       white-space: nowrap;
     }
 
-    .cli-tab.active {
+    .cli-tab-btn.active {
       background: var(--bg-surface);
       color: var(--text-main);
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-subtle);
     }
 
-    .cli-content {
-      padding: 28px;
+    .cli-body-content {
+      padding: 32px;
       font-family: 'Fira Code', monospace;
-      font-size: 0.9rem;
+      font-size: 0.925rem;
       line-height: 1.7;
     }
 
     /* Footer */
     footer {
-      border-top: 1px solid var(--border);
-      padding: 48px 0;
+      border-top: 1px solid var(--border-subtle);
+      padding: 50px 0;
       text-align: center;
       color: var(--text-dim);
-      font-size: 0.9rem;
+      font-size: 0.925rem;
     }
 
     footer a {
@@ -491,28 +568,28 @@
     }
 
     @media (max-width: 768px) {
-      .hero-heading { font-size: 2.5rem; }
-      .hero-description { font-size: 1.05rem; }
-      .grid-features { grid-template-columns: 1fr; }
+      .hero-title { font-size: 2.6rem; }
+      .hero-subtitle { font-size: 1.05rem; }
+      .features-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
 
   <div class="bg-grid"></div>
-  <div class="bg-glow"></div>
+  <div class="bg-glow-top"></div>
 
-  <!-- Navigation -->
+  <!-- Header -->
   <header>
-    <div class="container nav-content">
-      <a href="#" class="brand">
-        <div class="brand-icon">⚡</div>
+    <div class="container nav-wrapper">
+      <a href="#" class="brand-link">
+        <div class="brand-badge">⚡</div>
         <span class="brand-title">skill-sync</span>
       </a>
-      <nav class="nav-items">
-        <a href="#features" class="nav-link">Features</a>
-        <a href="#clients" class="nav-link">AI Clients</a>
-        <a href="#cli" class="nav-link">CLI Commands</a>
+      <nav class="nav-links">
+        <a href="#features" class="nav-item">Features</a>
+        <a href="#clients" class="nav-item">AI Clients</a>
+        <a href="#cli" class="nav-item">CLI Reference</a>
         <a href="https://github.com/DPR77/SkillSync" target="_blank" class="btn-github">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
           GitHub
@@ -524,150 +601,157 @@
   <!-- Hero Section -->
   <section class="hero">
     <div class="container">
-      <div class="eyebrow-badge">
-        🚀 Crafted by <a href="https://gtisantander.com" target="_blank">GTI Santander</a>
+      <div class="eyebrow">
+        🚀 CRAFTED BY <a href="https://gtisantander.com" target="_blank">GTI SANTANDER</a> · MIT LICENSED
       </div>
-      <h1 class="hero-heading">One Skill Install.<br>Every Machine & AI Client Synced.</h1>
-      <p class="hero-description">
-        Install an AI agent skill once. Access it instantly on your laptop, desktop, and across whichever AI client you launch next — Claude Code, Gemini, Antigravity, Cursor, and Codex.
+      <h1 class="hero-title">Your AI Agent Skills.<br>Every Machine & Client Synced.</h1>
+      <p class="hero-subtitle">
+        Install an AI skill once. Access it instantly on your desktop, laptop, and across whichever AI client you launch next — Claude Code, Gemini, Antigravity, Cursor, and Codex. Zero manual zipping. Zero path duplication.
       </p>
 
       <div class="install-box">
-        <div class="install-code"><span>$</span> npx skills add DPR77/SkillSync</div>
-        <button class="btn-copy" onclick="navigator.clipboard.writeText('npx skills add DPR77/SkillSync'); this.textContent = 'Copied!'; setTimeout(() => this.textContent = 'Copy', 2000);">Copy</button>
+        <div class="install-cmd"><span>$</span> npx skills add DPR77/SkillSync</div>
+        <button class="btn-copy" onclick="copyInstallCmd()">Copy Command</button>
       </div>
     </div>
   </section>
 
   <main class="container">
 
-    <!-- Interactive Live Terminal Simulation -->
-    <div class="demo-container">
-      <div class="demo-bar">
-        <span style="font-family: 'Fira Code', monospace; font-size: 0.85rem; color: var(--text-muted);">Interactive Live Simulation</span>
-        <div class="demo-controls">
-          <button class="demo-btn active" onclick="switchMachine('macbook')">Laptop (MacBook)</button>
-          <button class="demo-btn" onclick="switchMachine('desktop')">Desktop (Windows)</button>
+    <!-- Interactive Live Simulation -->
+    <div class="sim-card">
+      <div class="sim-header">
+        <span style="font-family: 'Fira Code', monospace; font-size: 0.85rem; color: var(--text-muted);">Live Interactive Multi-Machine Simulator</span>
+        <div class="sim-tabs">
+          <button class="sim-tab active" onclick="switchMachine('macbook')">Laptop (MacBook Pro)</button>
+          <button class="sim-tab" onclick="switchMachine('desktop')">Desktop (Windows PC)</button>
         </div>
       </div>
-      <div class="demo-body" id="demo-output">
-        <p><span style="color: var(--accent-teal);">$</span> python scripts/sync.py status</p>
-        <p style="color: var(--text-dim); margin-top: 6px;">Remote: gdrive:ClaudeSkills | machine: macbook-pro</p>
-        
+      <div class="sim-body" id="sim-canvas">
+        <p><span style="color: var(--accent-emerald);">$</span> python scripts/sync.py status</p>
+        <p style="color: var(--text-dim); margin-top: 6px;" id="sim-machine-info">Remote: gdrive:ClaudeSkills | machine: macbook-pro</p>
+
         <table class="status-table">
           <thead>
             <tr>
-              <th>Skill</th>
-              <th>Group</th>
+              <th>Skill Name</th>
+              <th>Category</th>
               <th>Status</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="sim-table-body">
             <tr>
               <td>web-builder</td>
               <td>work</td>
-              <td><span class="badge-state state-insync">in-sync</span></td>
+              <td><span class="state-badge state-insync">in-sync</span></td>
             </tr>
             <tr>
               <td>seo-audit</td>
               <td>work</td>
-              <td><span class="badge-state state-newer">local-newer</span></td>
+              <td><span class="state-badge state-newer">local-newer</span></td>
+            </tr>
+            <tr>
+              <td>skill-sync</td>
+              <td>work</td>
+              <td><span class="state-badge state-insync">in-sync</span></td>
             </tr>
             <tr>
               <td>grill-me</td>
               <td>personal</td>
-              <td><span class="badge-state state-remote">remote-only</span></td>
+              <td><span class="state-badge state-remote">remote-only</span></td>
             </tr>
           </tbody>
         </table>
 
-        <div style="margin-top: 20px; display: flex; gap: 12px;">
-          <button class="btn-copy" onclick="runPushSim()">Run Push (--threads 4)</button>
-          <button class="btn-copy" style="background: rgba(139, 92, 246, 0.2);" onclick="runPullSim()">Run Pull</button>
+        <div class="sim-actions">
+          <button class="sim-btn sim-btn-primary" onclick="simPush()">Run Push (--threads 4)</button>
+          <button class="sim-btn" onclick="simPull()">Run Pull</button>
+          <button class="sim-btn" onclick="simEdit()">Simulate Local Skill Edit</button>
         </div>
-        <div id="sim-log" style="margin-top: 14px; color: var(--accent-emerald); font-size: 0.85rem; min-height: 24px;"></div>
+        <div class="sim-output" id="sim-log-output">Ready. Select a simulation action above.</div>
       </div>
     </div>
 
-    <!-- Architectural Highlights -->
+    <!-- Architectural Grid -->
     <section id="features">
-      <div class="section-header">
-        <h2 class="section-title">Engineered for Performance & Trust</h2>
-        <p class="section-desc">Zero-dependency Python core designed for seamless multi-environment workflows.</p>
+      <div class="section-head">
+        <h2 class="section-title">Engineered for Craft & High Concurrency</h2>
+        <p class="section-desc">Pure Python 3.8+ stdlib core designed for non-admin cross-platform workflows.</p>
       </div>
 
-      <div class="grid-features">
-        <div class="feature-card">
-          <div class="feature-icon-box">🔗</div>
-          <h3 class="feature-heading">Non-Admin Junctions & Symlinks</h3>
-          <p class="feature-text">Link skills across local clients instantly with <code>place --symlink</code> using Windows NTFS Directory Junctions (zero admin elevation required) and POSIX symlinks on macOS/Linux.</p>
+      <div class="features-grid">
+        <div class="card-feature">
+          <div class="feature-icon-badge">🔗</div>
+          <h3 class="feature-title">Non-Admin Junctions & Symlinks</h3>
+          <p class="feature-desc">Link skills across AI clients instantly with <code>place --symlink</code> using NTFS Directory Junctions on Windows (zero UAC admin elevation required) and POSIX symlinks on macOS/Linux.</p>
         </div>
 
-        <div class="feature-card">
-          <div class="feature-icon-box">⚡</div>
-          <h3 class="feature-heading">Parallel Multi-Thread Engine</h3>
-          <p class="feature-text">Concurrent skill uploads and downloads via <code>--threads</code> powered by <code>ThreadPoolExecutor</code>. Sync 20+ skills in under 3 seconds.</p>
+        <div class="card-feature">
+          <div class="feature-icon-badge">⚡</div>
+          <h3 class="feature-title">Parallel Multi-Thread Engine</h3>
+          <p class="feature-desc">Concurrent skill uploads and downloads via <code>--threads N</code> powered by <code>ThreadPoolExecutor</code>. Sync dozens of skills in under 3 seconds.</p>
         </div>
 
-        <div class="feature-card">
-          <div class="feature-icon-box">🛡️</div>
-          <h3 class="feature-heading">Proactive Credential Defense</h3>
-          <p class="feature-text">Native pre-push scanner flags unintended OpenAI, Anthropic, AWS, or private keys before upload, supporting inline pragma opt-outs (<code># skill-sync: allow-secret</code>).</p>
+        <div class="card-feature">
+          <div class="feature-icon-badge">🛡️</div>
+          <h3 class="feature-title">Proactive Credential Defense</h3>
+          <p class="feature-desc">Native pre-push scanner flags unintended OpenAI, Anthropic, AWS, or private keys before upload, supporting inline pragma opt-outs (<code># skill-sync: allow-secret</code>).</p>
         </div>
 
-        <div class="feature-card">
-          <div class="feature-icon-box">☁️</div>
-          <h3 class="feature-heading">Multi-Cloud Storage via Rclone</h3>
-          <p class="feature-text">Sync seamlessly to Google Drive, Dropbox, OneDrive, S3, WebDAV, Nextcloud, or a local NAS directory with zero vendor lock-in.</p>
+        <div class="card-feature">
+          <div class="feature-icon-badge">☁️</div>
+          <h3 class="feature-title">Multi-Cloud Storage via Rclone</h3>
+          <p class="feature-desc">Sync seamlessly to Google Drive, Dropbox, OneDrive, S3, WebDAV, Nextcloud, or a local NAS directory with zero vendor lock-in.</p>
         </div>
 
-        <div class="feature-card">
-          <div class="feature-icon-box">🔄</div>
-          <h3 class="feature-heading">Automated Session Hooks</h3>
-          <p class="feature-text">Silent background <code>Stop</code> hook auto-pushes session edits under 90s, while <code>SessionStart</code> alerts you when newer cloud updates are available.</p>
+        <div class="card-feature">
+          <div class="feature-icon-badge">🔄</div>
+          <h3 class="feature-title">Automated Session Hooks</h3>
+          <p class="feature-desc">Silent background <code>Stop</code> hook auto-pushes session edits under 90s, while <code>SessionStart</code> alerts you when newer cloud updates are available.</p>
         </div>
 
-        <div class="feature-card">
-          <div class="feature-icon-box">💻</div>
-          <h3 class="feature-heading">Full Interactive TUI Menu</h3>
-          <p class="feature-text">Includes a terminal interface (<code>python scripts/menu.py</code>) featuring arrow-key navigation, checkbox skill selections, and live search filtering.</p>
+        <div class="card-feature">
+          <div class="feature-icon-badge">💻</div>
+          <h3 class="feature-title">Full Interactive TUI Menu</h3>
+          <p class="feature-desc">Includes a full-screen ASCII terminal interface (<code>python scripts/menu.py</code>) featuring arrow-key navigation, live search filtering, and checkbox selection.</p>
         </div>
       </div>
     </section>
 
-    <!-- Client Compatibility Matrix -->
+    <!-- Client Matrix -->
     <section id="clients" class="clients-card">
-      <h2 class="section-title">Universal AI Client Support</h2>
-      <p class="section-desc">Discovers and mirrors your skills across every AI tool installed on your computer.</p>
+      <h2 class="section-title">Universal AI Client Mirroring</h2>
+      <p class="section-desc">Discovers and mirrors your skills across every AI tool installed on your system.</p>
 
-      <div class="clients-wrapper">
-        <div class="client-tag">💬 Claude Code</div>
-        <div class="client-tag">🤖 Google Gemini / Antigravity IDE</div>
-        <div class="client-tag">⚡ Cursor IDE</div>
-        <div class="client-tag">🧠 OpenAI Codex</div>
-        <div class="client-tag">🦅 OpenClaw / Hermes</div>
-        <div class="client-tag">🌐 Global User Agents</div>
+      <div class="clients-grid">
+        <div class="client-badge">💬 Claude Code</div>
+        <div class="client-badge">🤖 Google Gemini / Antigravity IDE</div>
+        <div class="client-badge">⚡ Cursor IDE</div>
+        <div class="client-badge">🧠 OpenAI Codex</div>
+        <div class="client-badge">🦅 OpenClaw / Hermes</div>
+        <div class="client-badge">🌐 Global User Agents</div>
       </div>
     </section>
 
-    <!-- CLI Command Reference -->
-    <section id="cli" style="margin-bottom: 100px;">
-      <div class="section-header">
+    <!-- CLI Reference Tabs -->
+    <section id="cli" style="margin-bottom: 110px;">
+      <div class="section-head">
         <h2 class="section-title">CLI Command Reference</h2>
-        <p class="section-desc">Simple, explicit commands for exact control over your skill ecosystem.</p>
+        <p class="section-desc">Explicit, deterministic CLI subcommands for precise control.</p>
       </div>
 
-      <div class="cli-box">
-        <div class="cli-header">
-          <button class="cli-tab active" onclick="showCli('setup')">setup</button>
-          <button class="cli-tab" onclick="showCli('status')">status</button>
-          <button class="cli-tab" onclick="showCli('push')">push</button>
-          <button class="cli-tab" onclick="showCli('pull')">pull</button>
-          <button class="cli-tab" onclick="showCli('place')">place</button>
+      <div class="cli-card">
+        <div class="cli-nav">
+          <button class="cli-tab-btn active" onclick="renderCliTab('setup')">setup</button>
+          <button class="cli-tab-btn" onclick="renderCliTab('status')">status</button>
+          <button class="cli-tab-btn" onclick="renderCliTab('push')">push</button>
+          <button class="cli-tab-btn" onclick="renderCliTab('pull')">pull</button>
+          <button class="cli-tab-btn" onclick="renderCliTab('place')">place</button>
+          <button class="cli-tab-btn" onclick="renderCliTab('doctor')">doctor</button>
         </div>
-        <div class="cli-content" id="cli-body">
-          <p style="color: var(--accent-teal);">$ python scripts/sync.py setup --remote gdrive: --categories work,school,personal</p>
-          <p style="color: var(--text-dim); margin-top: 8px;"># One-time configuration connecting your computer to an rclone storage remote and categories.</p>
+        <div class="cli-body-content" id="cli-display">
+          <p style="color: var(--accent-emerald);">$ python scripts/sync.py setup --remote gdrive: --categories work,school,personal</p>
+          <p style="color: var(--text-dim); margin-top: 10px;"># One-time setup linking your computer to an rclone storage remote and categories.</p>
         </div>
       </div>
     </section>
@@ -677,88 +761,114 @@
   <!-- Footer -->
   <footer>
     <div class="container">
-      <p>Crafted with care by <a href="https://gtisantander.com" target="_blank">GTI Santander</a> · Source code on <a href="https://github.com/DPR77/SkillSync" target="_blank">GitHub</a></p>
+      <p>Crafted with precision by <a href="https://gtisantander.com" target="_blank">GTI Santander</a> · Source code on <a href="https://github.com/DPR77/SkillSync" target="_blank">GitHub</a></p>
       <p style="margin-top: 8px; font-size: 0.8rem; color: var(--text-dim);">MIT License · 2026 skill-sync</p>
     </div>
   </footer>
 
+  <div class="toast" id="toast-msg">Copied to clipboard!</div>
+
   <script>
+    function copyInstallCmd() {
+      navigator.clipboard.writeText('npx skills add DPR77/SkillSync');
+      showToast('Command copied to clipboard!');
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('toast-msg');
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 2200);
+    }
+
+    let activeMachine = 'macbook';
+
     function switchMachine(m) {
-      document.querySelectorAll('.demo-btn').forEach(b => b.classList.remove('active'));
+      activeMachine = m;
+      document.querySelectorAll('.sim-tab').forEach(b => b.classList.remove('active'));
       event.target.classList.add('active');
-      const log = document.getElementById('sim-log');
-      log.textContent = '';
+      const info = document.getElementById('sim-machine-info');
+      const tbody = document.getElementById('sim-table-body');
+      const log = document.getElementById('sim-log-output');
+
       if (m === 'desktop') {
-        document.getElementById('demo-output').querySelector('.status-table tbody').innerHTML = `
-          <tr><td>web-builder</td><td>work</td><td><span class="badge-state state-insync">in-sync</span></td></tr>
-          <tr><td>seo-audit</td><td>work</td><td><span class="badge-state state-remote">remote-only</span></td></tr>
-          <tr><td>grill-me</td><td>personal</td><td><span class="badge-state state-insync">in-sync</span></td></tr>
+        info.textContent = 'Remote: gdrive:ClaudeSkills | machine: win-desktop';
+        tbody.innerHTML = `
+          <tr><td>web-builder</td><td>work</td><td><span class="state-badge state-insync">in-sync</span></td></tr>
+          <tr><td>seo-audit</td><td>work</td><td><span class="state-badge state-remote">remote-only</span></td></tr>
+          <tr><td>skill-sync</td><td>work</td><td><span class="state-badge state-insync">in-sync</span></td></tr>
+          <tr><td>grill-me</td><td>personal</td><td><span class="state-badge state-insync">in-sync</span></td></tr>
         `;
+        log.textContent = 'Switched context to Windows Workstation desktop.';
       } else {
-        document.getElementById('demo-output').querySelector('.status-table tbody').innerHTML = `
-          <tr><td>web-builder</td><td>work</td><td><span class="badge-state state-insync">in-sync</span></td></tr>
-          <tr><td>seo-audit</td><td>work</td><td><span class="badge-state state-newer">local-newer</span></td></tr>
-          <tr><td>grill-me</td><td>personal</td><td><span class="badge-state state-remote">remote-only</span></td></tr>
+        info.textContent = 'Remote: gdrive:ClaudeSkills | machine: macbook-pro';
+        tbody.innerHTML = `
+          <tr><td>web-builder</td><td>work</td><td><span class="state-badge state-insync">in-sync</span></td></tr>
+          <tr><td>seo-audit</td><td>work</td><td><span class="state-badge state-newer">local-newer</span></td></tr>
+          <tr><td>skill-sync</td><td>work</td><td><span class="state-badge state-insync">in-sync</span></td></tr>
+          <tr><td>grill-me</td><td>personal</td><td><span class="state-badge state-remote">remote-only</span></td></tr>
         `;
+        log.textContent = 'Switched context to MacBook Pro laptop.';
       }
     }
 
-    function runPushSim() {
-      const log = document.getElementById('sim-log');
-      log.textContent = '⚡ Uploading changed skills via 4 threads...';
+    function simPush() {
+      const log = document.getElementById('sim-log-output');
+      log.textContent = '⚡ Running parallel push across 4 threads... Scanning for secrets...';
       setTimeout(() => {
-        log.textContent = '✓ Push completed: seo-audit is now in-sync on remote';
-        const badge = document.querySelectorAll('.badge-state')[1];
-        if (badge) {
-          badge.className = 'badge-state state-insync';
-          badge.textContent = 'in-sync';
+        log.textContent = '✓ Push complete: 1 skill uploaded (seo-audit). Remote manifest updated.';
+        const badges = document.querySelectorAll('.state-badge');
+        if (badges[1]) {
+          badges[1].className = 'state-badge state-insync';
+          badges[1].textContent = 'in-sync';
         }
-      }, 800);
+      }, 700);
     }
 
-    function runPullSim() {
-      const log = document.getElementById('sim-log');
-      log.textContent = '⚡ Downloading remote skills...';
+    function simPull() {
+      const log = document.getElementById('sim-log-output');
+      log.textContent = '⚡ Pulling remote skills for personal category...';
       setTimeout(() => {
-        log.textContent = '✓ Pull completed: grill-me downloaded into local skills directory';
-        const badge = document.querySelectorAll('.badge-state')[2];
-        if (badge) {
-          badge.className = 'badge-state state-insync';
-          badge.textContent = 'in-sync';
+        log.textContent = '✓ Pull complete: grill-me downloaded into local skills directory.';
+        const badges = document.querySelectorAll('.state-badge');
+        if (badges[3]) {
+          badges[3].className = 'state-badge state-insync';
+          badges[3].textContent = 'in-sync';
         }
-      }, 800);
+      }, 700);
     }
 
-    function showCli(cmd) {
-      document.querySelectorAll('.cli-tab').forEach(t => t.classList.remove('active'));
+    function simEdit() {
+      const log = document.getElementById('sim-log-output');
+      log.textContent = '📝 Modified SKILL.md in local web-builder directory.';
+      const badges = document.querySelectorAll('.state-badge');
+      if (badges[0]) {
+        badges[0].className = 'state-badge state-newer';
+        badges[0].textContent = 'local-newer';
+      }
+    }
+
+    function renderCliTab(cmd) {
+      document.querySelectorAll('.cli-tab-btn').forEach(t => t.classList.remove('active'));
       event.target.classList.add('active');
-      const body = document.getElementById('cli-body');
-      if (cmd === 'setup') {
-        body.innerHTML = `
-          <p style="color: var(--accent-teal);">$ python scripts/sync.py setup --remote gdrive: --categories work,school,personal</p>
-          <p style="color: var(--text-dim); margin-top: 8px;"># One-time configuration connecting your computer to an rclone storage remote and categories.</p>
-        `;
-      } else if (cmd === 'status') {
-        body.innerHTML = `
-          <p style="color: var(--accent-teal);">$ python scripts/sync.py status</p>
-          <p style="color: var(--text-dim); margin-top: 8px;"># Compares all local skills against cloud remote hashes and shows state matrix (in-sync, local-newer, remote-newer, conflict).</p>
-        `;
-      } else if (cmd === 'push') {
-        body.innerHTML = `
-          <p style="color: var(--accent-teal);">$ python scripts/sync.py push --threads 4</p>
-          <p style="color: var(--text-dim); margin-top: 8px;"># Secret-scans and uploads changed skills to remote storage concurrently using 4 parallel threads.</p>
-        `;
-      } else if (cmd === 'pull') {
-        body.innerHTML = `
-          <p style="color: var(--accent-teal);">$ python scripts/sync.py pull work --threads 4</p>
-          <p style="color: var(--text-dim); margin-top: 8px;"># Downloads skills belonging to the specified category directly into where your local machine keeps them.</p>
-        `;
-      } else if (cmd === 'place') {
-        body.innerHTML = `
-          <p style="color: var(--accent-teal);">$ python scripts/sync.py place my-skill gemini --symlink --force</p>
-          <p style="color: var(--text-dim); margin-top: 8px;"># Instantly links a skill to another AI client folder using non-admin NTFS Directory Junctions on Windows and POSIX symlinks on Unix.</p>
-        `;
-      }
+      const display = document.getElementById('cli-display');
+
+      const data = {
+        setup: `<p style="color: var(--accent-emerald);">$ python scripts/sync.py setup --remote gdrive: --categories work,school,personal</p>
+                <p style="color: var(--text-dim); margin-top: 10px;"># One-time setup linking your computer to an rclone storage remote and categories.</p>`,
+        status: `<p style="color: var(--accent-emerald);">$ python scripts/sync.py status --json</p>
+                 <p style="color: var(--text-dim); margin-top: 10px;"># Compares all local skills against cloud remote hashes and outputs status matrix.</p>`,
+        push: `<p style="color: var(--accent-emerald);">$ python scripts/sync.py push --threads 4</p>
+               <p style="color: var(--text-dim); margin-top: 10px;"># Secret-scans and uploads changed skills to remote storage concurrently using 4 threads.</p>`,
+        pull: `<p style="color: var(--accent-emerald);">$ python scripts/sync.py pull work --threads 4</p>
+               <p style="color: var(--text-dim); margin-top: 10px;"># Downloads skills belonging to specified categories directly into where local machine keeps them.</p>`,
+        place: `<p style="color: var(--accent-emerald);">$ python scripts/sync.py place my-skill gemini --symlink --force</p>
+                <p style="color: var(--text-dim); margin-top: 10px;"># Links a skill to another AI client folder using non-admin NTFS Directory Junctions on Windows and POSIX symlinks on Unix.</p>`,
+        doctor: `<p style="color: var(--accent-emerald);">$ python scripts/sync.py doctor</p>
+                 <p style="color: var(--text-dim); margin-top: 10px;"># Diagnoses rclone binary, remote connectivity, state directory, lock status, and session hooks.</p>`
+      };
+
+      display.innerHTML = data[cmd] || data['setup'];
     }
   </script>
 </body>
