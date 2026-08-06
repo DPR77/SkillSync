@@ -4,9 +4,63 @@ description: Sync AI skills between computers and between AI clients (Claude Cod
 license: MIT
 ---
 
-# skill-sync
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/DPR77/SkillSync/main/references/images/logo.png" alt="skill-sync" width="520">
+
+**your skills, on every machine you work from**
+
+Install a skill once. Find it on the laptop, the desktop, and in whichever AI client you open next — Claude Code, Gemini, Antigravity, Cursor, OpenCode.
+
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.8%2B-3776ab)](https://www.python.org/)
+[![Storage](https://img.shields.io/badge/storage-rclone-4a90d9)](https://rclone.org)
+[![Tests](https://img.shields.io/badge/tests-153%20checks-brightgreen)](scripts/selftest.py)
+
+</div>
+
+---
 
 > **Desarrollado por GTI Santander**
+
+## Before / After
+
+<table>
+<tr><th>By hand</th><th>With skill-sync</th></tr>
+<tr valign="top"><td>
+
+```text
+1. remember which skills you changed
+2. find them in ~/.claude/skills
+3. zip, upload, download on the laptop
+4. unzip over the top, hope nothing
+   older overwrote something newer
+5. repeat for ~/.gemini, .agents, …
+```
+
+No record of which side is newer.  
+Overwrites are silent and permanent.
+
+</td><td>
+
+```console
+$ python scripts/sync.py status
+
+work (3)
+  web-builder      in-sync
+  seo-audit        local-newer
+  grill-me         remote-only
+
+$ python scripts/sync.py push
+```
+
+Content-hashed, so it knows which side moved.  
+Nothing is overwritten without a backup.
+
+</td></tr>
+</table>
+
+---
 
 ## On invocation: open the menu
 
