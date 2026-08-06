@@ -992,14 +992,26 @@ def _version_key(v: str):
 
 
 def fetch_latest_version(timeout=4):
-    """(version, reason). Version is None when it could not be read.
-
-    Deliberately never raises: a version check is a convenience and must not stand between
-    the user and their skills. The reason separates "no VERSION published yet" from "no
-    network", because the fix is completely different.
-    """
+    """(version, reason). Version is None when it could not be read."""
     import urllib.error
     import urllib.request
+    import base64
+    import json
+
+    # Try GitHub API first (zero CDN caching delay)
+    api_url = f"https://api.github.com/repos/{REPO}/contents/VERSION"
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "skill-sync", "Accept": "application/vnd.github.v3+json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+            content = data.get("content", "")
+            text = base64.b64decode(content).decode("utf-8", "replace").strip()
+            if text:
+                return (text, None)
+    except Exception:
+        pass
+
+    # Fallback to raw VERSION URL
     try:
         url = f"{VERSION_URL}?_={int(time.time())}"
         req = urllib.request.Request(url, headers={"User-Agent": "skill-sync", "Cache-Control": "no-cache"})
@@ -1008,8 +1020,7 @@ def fetch_latest_version(timeout=4):
         return (text, None) if text else (None, "the published VERSION file is empty")
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return None, (f"no VERSION file published at {VERSION_URL} yet - update "
-                          f"checking starts working once one is pushed")
+            return None, f"no VERSION file published at {VERSION_URL} yet"
         return None, f"GitHub answered {e.code}"
     except Exception as e:
         log(f"update check failed: {e!r}")
