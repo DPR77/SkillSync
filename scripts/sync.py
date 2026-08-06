@@ -1277,7 +1277,7 @@ def cmd_push(args):
             deadline = time.monotonic() + args.budget_seconds
         json_out = getattr(args, "json", False)
         total = len(to_push)
-        threads = getattr(args, "threads", 1) or 1
+        threads = getattr(args, "threads", 8) or 8
         lock_entries = threading.Lock()
 
         def _do_push_item(idx, item):
@@ -1403,7 +1403,7 @@ def cmd_pull(args):
 
         pulled, conflicts, skipped_in_sync = [], [], []
         total_wanted = len(wanted)
-        threads = getattr(args, "threads", 1) or 1
+        threads = getattr(args, "threads", 8) or 8
         pull_tasks = []
 
         for n, name in enumerate(sorted(wanted), 1):
@@ -2019,7 +2019,7 @@ def build_parser():
     s.add_argument("--budget", type=float, dest="budget_seconds",
                    help="stop starting new uploads after this many seconds; the rest go "
                         "on the next run")
-    s.add_argument("--threads", type=int, default=1, help="number of parallel transfer threads (default: 1)")
+    s.add_argument("--threads", type=int, default=8, help="number of parallel transfer threads (default: 8)")
     s.set_defaults(func=cmd_push, deadline=None)
 
     s = sub.add_parser("pull", help="download skills by category")
@@ -2028,7 +2028,7 @@ def build_parser():
     s.add_argument("--dest", help="alternative destination folder (for testing)")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--force", action="store_true", help="overwrite the local copy")
-    s.add_argument("--threads", type=int, default=1, help="number of parallel transfer threads (default: 1)")
+    s.add_argument("--threads", type=int, default=8, help="number of parallel transfer threads (default: 8)")
     s.set_defaults(func=cmd_pull)
 
     s = sub.add_parser("categorize", help="set, add or remove a skill's groups")
