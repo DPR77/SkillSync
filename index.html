@@ -31,9 +31,17 @@
     }
 
     .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
       font-weight: 700;
       font-size: 1rem;
       letter-spacing: -0.02em;
+    }
+
+    .nav-logo img {
+      height: 28px;
+      width: auto;
     }
 
     .nav-links {
@@ -174,6 +182,16 @@
       padding: 5px 12px;
       font-size: 0.8rem;
       color: #444;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .client img {
+      width: 16px;
+      height: 16px;
+      object-fit: contain;
+      display: block;
     }
 
     /* ─── CLI ─── */
@@ -274,7 +292,10 @@
 <body>
 
   <nav>
-    <span class="nav-logo">skill-sync</span>
+    <span class="nav-logo">
+      <img src="https://raw.githubusercontent.com/DPR77/SkillSync/main/references/images/logo.png" alt="skill-sync" onerror="this.style.display='none'">
+      skill-sync
+    </span>
     <div class="nav-links">
       <a href="https://gtisantander.com" target="_blank">GTI Santander</a>
       <a href="https://github.com/DPR77/SkillSync" target="_blank" class="btn">GitHub</a>
@@ -321,12 +342,37 @@
   <div class="clients">
     <span class="clients-label">Works with</span>
     <div class="clients-list">
-      <span class="client">Claude Code</span>
-      <span class="client">Gemini</span>
-      <span class="client">Antigravity IDE</span>
-      <span class="client">Cursor</span>
-      <span class="client">OpenAI Codex</span>
-      <span class="client">OpenClaw</span>
+
+      <!-- Anthropic / Claude Code -->
+      <span class="client">
+        <img src="https://cdn.simpleicons.org/anthropic/191919" alt="Anthropic" onerror="this.style.display='none'">
+        Claude Code
+      </span>
+
+      <!-- Google Gemini -->
+      <span class="client">
+        <img src="https://cdn.simpleicons.org/google/4285F4" alt="Google" onerror="this.style.display='none'">
+        Gemini
+      </span>
+
+      <!-- Cursor -->
+      <span class="client">
+        <img src="https://cdn.simpleicons.org/cursor/111" alt="Cursor" onerror="this.style.display='none'">
+        Cursor
+      </span>
+
+      <!-- OpenAI -->
+      <span class="client">
+        <img src="https://cdn.simpleicons.org/openai/111" alt="OpenAI" onerror="this.style.display='none'">
+        OpenAI Codex
+      </span>
+
+      <!-- Antigravity IDE (Google DeepMind) -->
+      <span class="client">
+        <img src="https://cdn.simpleicons.org/googlegemini/8B5CF6" alt="Antigravity" onerror="this.style.display='none'">
+        Antigravity IDE
+      </span>
+
     </div>
   </div>
 
@@ -348,7 +394,13 @@
   </div>
 
   <footer>
-    <p>By <a href="https://gtisantander.com" target="_blank">GTI Santander</a> · <a href="https://github.com/DPR77/SkillSync" target="_blank">GitHub</a></p>
+    <p>By
+      <a href="https://gtisantander.com" target="_blank" style="display:inline-flex;align-items:center;gap:6px;">
+        <img src="https://www.gtisantander.com/favicon.ico" alt="GTI Santander" width="16" height="16" style="border-radius:3px;" onerror="this.style.display='none'">
+        GTI Santander
+      </a>
+      · <a href="https://github.com/DPR77/SkillSync" target="_blank">GitHub</a>
+    </p>
     <p>MIT License</p>
   </footer>
 
