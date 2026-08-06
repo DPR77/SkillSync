@@ -10,6 +10,8 @@ license: MIT
 
 **your skills, on every machine you work from**
 
+Desarrollado por **[GTI Santander](https://gtisantander.com)**
+
 Install a skill once. Find it on the laptop, the desktop, and in whichever AI client you open next — Claude Code, Gemini, Antigravity, Cursor, OpenCode.
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -21,7 +23,7 @@ Install a skill once. Find it on the laptop, the desktop, and in whichever AI cl
 
 ---
 
-> **Desarrollado por GTI Santander**
+> **Desarrollado por [GTI Santander](https://gtisantander.com)**
 
 ## Before / After
 

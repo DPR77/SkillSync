@@ -4,6 +4,8 @@
 
 **your skills, on every machine you work from**
 
+Desarrollado por **[GTI Santander](https://gtisantander.com)**
+
 Install a skill once. Find it on the laptop, the desktop, and in whichever AI client you
 open next — Claude Code, Gemini, Antigravity, Cursor, OpenCode.
 
