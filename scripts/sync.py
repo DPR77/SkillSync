@@ -19,8 +19,10 @@ Exit codes: 0 ok / 1 error or blocked / 2 needs user input.
 from __future__ import annotations
 
 import argparse
+import difflib
 import fnmatch
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -29,6 +31,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,12 +103,30 @@ CONFLICTS_DIR = STATE_DIR / "conflicts"
 TRASH_DIR = STATE_DIR / "trash"
 LOG_FILE = STATE_DIR / "sync.log"
 LOCK_FILE = STATE_DIR / "sync.lock"
+FPCACHE_FILE = STATE_DIR / "fpcache.json"
 
-MANIFEST_NAME = "manifest.json"
+# skill-sync does not sync itself. It would be uploading the tool that is mid-upload, and
+# a pull could replace the running code underneath it - which is exactly how it ended up
+# permanently in conflict with its own remote copy. It updates from GitHub instead.
+SELF_NAME = "skill-sync"
+REPO = "DPR77/SkillSync"
+REPO_URL = f"https://github.com/{REPO}"
+VERSION_URL = f"https://raw.githubusercontent.com/{REPO}/main/VERSION"
+ARCHIVE_URL = f"{REPO_URL}/archive/refs/heads/main.zip"
+UPDATE_CHECK_INTERVAL = 24 * 3600
+VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
+
+MANIFEST_NAME = "manifest.json"        # legacy single-file manifest, migrated on first write
+MANIFEST_DIR = "manifest.d"            # one <skill>.json per skill: no cross-machine clobber
+MANIFEST_LEGACY_NAME = "manifest.legacy.json"
 NO_CATEGORY = "uncategorised"
 REMOTE_CHECK_INTERVAL = 6 * 3600   # hook-session-start: at most one remote check per 6h
 LOCK_STALE_SECONDS = 15 * 60
 BIG_SKILL_BYTES = 20 * 1024 * 1024
+KEEP_TRASH_DAYS = 30               # backups older than this are deleted, local and remote
+REMOTE_TRASH_SWEEP_INTERVAL = 24 * 3600   # the remote sweep is housekeeping, not urgent
+REMOTE_TRASH_SWEEP_MAX = 5                # folders per sweep, so no sync waits on cleanup
+HOOK_BUDGET_SECONDS = 90           # Stop hook uploads within this, the rest goes next time
 
 IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
                ".pytest_cache", ".ruff_cache", ".idea", ".vscode"}
@@ -125,6 +146,14 @@ SECRET_PATTERNS = [
 SECRET_SCAN_EXT = {".py", ".js", ".mjs", ".ts", ".sh", ".bash", ".zsh", ".ps1", ".md", ".json",
                    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".txt", ".env", ".xml"}
 SECRET_SCAN_MAX_BYTES = 512 * 1024
+# Opt-out for a genuine false positive, so nobody reaches for --no-scan (which drops the
+# check for the whole push) because of one documented example line.
+SECRET_ALLOW_PRAGMA = "skill-sync: allow-secret"
+# Documentation is full of fake keys. Flagging those trains people to ignore the warning,
+# which is worse than not warning at all.
+PLACEHOLDER_RE = re.compile(
+    r"(?i)example|dummy|changeme|placeholder|redacted|your[_-]?(api[_-]?)?key|<[^>]+>|xxxx|"
+    r"abcdef|123456|0123456789")
 
 # skill states
 IN_SYNC = "in-sync"
@@ -167,9 +196,19 @@ def load_json(path: Path, default):
 
 def save_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    # The scratch name carries this process's pid. A fixed ".tmp" is shared by every
+    # process writing the same file, and on Windows the rename then fails outright
+    # because the other one still holds the handle.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def load_config():
@@ -179,8 +218,15 @@ def load_config():
 def require_config():
     cfg = load_config()
     if not cfg:
+        # Name the file it looked for. An inherited SKILL_SYNC_HOME pointing somewhere
+        # else looks exactly like "never configured", and there is no way to tell the two
+        # apart without being told where it searched.
+        override = os.environ.get("SKILL_SYNC_HOME")
+        where = f"No config at {CONFIG_FILE}"
+        if override:
+            where += f"\n  (SKILL_SYNC_HOME is set to {override} - unset it to use the default)"
         raise SyncError(
-            "skill-sync is not configured yet.\n"
+            f"skill-sync is not configured yet.\n  {where}\n"
             "  1. rclone config                 (create a remote: Drive, Dropbox, ...)\n"
             "  2. python sync.py setup --remote <remote:> --categories work,school,personal")
     cfg.setdefault("categories", [])
@@ -204,6 +250,72 @@ def machine_name(cfg=None) -> str:
         return "unknown"
 
 
+# ------------------------------------------------------------------ progress
+
+def _interactive() -> bool:
+    """Whether anyone is watching. Silent for hooks, pipes, --json and the test suite."""
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def progress_bar(done: int, total: int, label: str = "", width: int = 24) -> None:
+    """One redrawn line for a multi-step transfer."""
+    if not _interactive() or total <= 0:
+        return
+    filled = int(width * done / total)
+    bar = "#" * filled + "." * (width - filled)
+    line = f"  [{bar}] {done}/{total}  {label}"
+    # shutil, not os/sys: it falls back to 80x24 instead of raising when there is no
+    # console attached, which is exactly the case this runs in under a hook.
+    columns = shutil.get_terminal_size((80, 24)).columns
+    sys.stdout.write("\r\x1b[K" + line[:max(20, columns - 1)])
+    if done >= total:
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+class Spinner:
+    """Movement while a single rclone call runs.
+
+    One skill is one rclone invocation whose output we capture, so a large upload showed
+    nothing at all until it finished - indistinguishable from a hang. This ticks in a
+    daemon thread and erases itself on the way out.
+    """
+
+    FRAMES = "|/-\\"
+
+    def __init__(self, label: str):
+        self.label = label
+        self.enabled = _interactive()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def __enter__(self):
+        if self.enabled:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def _run(self):
+        start = time.monotonic()
+        for i in itertools.count():
+            if self._stop.wait(0.12):
+                return
+            sys.stdout.write(f"\r\x1b[K  {self.FRAMES[i % 4]} {self.label} "
+                             f"({time.monotonic() - start:.0f}s)")
+            sys.stdout.flush()
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+            sys.stdout.write("\r\x1b[K")
+            sys.stdout.flush()
+        return False
+
+
 def human_size(n) -> str:
     n = float(n or 0)
     for unit in ("B", "KB", "MB", "GB"):
@@ -211,6 +323,56 @@ def human_size(n) -> str:
             return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
         n /= 1024
     return f"{n:.1f}GB"
+
+
+def pid_alive(pid) -> bool:
+    """Whether a process is still running, without signalling it.
+
+    os.kill(pid, 0) is the usual trick, but on Windows os.kill does not implement signal
+    0 - it calls TerminateProcess, so the "check" would kill the very process it asks
+    about. Windows therefore goes through OpenProcess instead.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE = 0x1000, 259
+        k = ctypes.windll.kernel32
+        handle = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if k.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return code.value == STILL_ACTIVE
+            return True                          # cannot tell: assume it is alive
+        finally:
+            k.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True                              # exists but not ours to probe
+    return True
+
+
+def lock_is_live() -> bool:
+    """Whether a lock file represents a sync that is actually still running.
+
+    A crashed run leaves the file behind. Treating that as "busy" forever silently
+    disabled the Stop hook's auto-upload, so callers that only want to stay out of the
+    way must ask this rather than testing for the file's existence.
+    """
+    if not LOCK_FILE.exists():
+        return False
+    info = load_json(LOCK_FILE, {}) or {}
+    if time.time() - float(info.get("time") or 0) >= LOCK_STALE_SECONDS:
+        return False
+    pid = info.get("pid")
+    if pid is not None and pid != os.getpid():
+        return pid_alive(pid)
+    return True
 
 
 class Lock:
@@ -222,16 +384,33 @@ class Lock:
 
     def __enter__(self):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        if LOCK_FILE.exists():
-            info = load_json(LOCK_FILE, {})
-            age = time.time() - float(info.get("time") or 0)
-            if age < LOCK_STALE_SECONDS:
-                raise SyncError(f"another skill-sync run is in progress (pid {info.get('pid')}). "
-                                f"Delete {LOCK_FILE} if that is wrong.")
-            log(f"stale lock removed (age {age:.0f}s)")
-        save_json(LOCK_FILE, {"pid": os.getpid(), "time": time.time()})
-        self.acquired = True
-        return self
+        payload = json.dumps({"pid": os.getpid(), "time": time.time()})
+        # O_CREAT|O_EXCL is the lock: the filesystem decides the winner in one atomic step.
+        # Checking existence and then writing leaves a window where both processes think
+        # they won, and on Windows the two writes collide on the rename instead.
+        for attempt in (1, 2):
+            try:
+                fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                info = load_json(LOCK_FILE, {})
+                if lock_is_live():
+                    raise SyncError(
+                        f"another skill-sync run is in progress (pid {info.get('pid')}). "
+                        f"Delete {LOCK_FILE} if that is wrong.")
+                age = time.time() - float(info.get("time") or 0)
+                log(f"stale lock removed (age {age:.0f}s, pid {info.get('pid')} gone)")
+                try:
+                    LOCK_FILE.unlink()
+                except OSError:
+                    pass
+                if attempt == 2:                 # someone else keeps winning the retry
+                    raise SyncError(f"could not take the lock at {LOCK_FILE}; "
+                                    f"delete it if no sync is running")
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+            self.acquired = True
+            return self
 
     def __exit__(self, *exc):
         if self.acquired:
@@ -385,36 +564,152 @@ def quick_sig(skill_dir: Path):
     return round(mtime_max, 3), count
 
 
+_FP_CACHE = None
+
+
+def fingerprint_cached(skill_dir: Path):
+    """fingerprint(), skipping the full read when nothing changed.
+
+    `status` re-hashed every byte of every skill on every call, and the menu calls it on
+    each refresh. The cheap signature is the same one the Stop hook already trusts to
+    decide whether a skill changed, so reusing it here costs no extra accuracy.
+    """
+    global _FP_CACHE
+    if _FP_CACHE is None:
+        _FP_CACHE = load_json(FPCACHE_FILE, {}) or {}
+    key = str(skill_dir)
+    mtime, count = quick_sig(skill_dir)
+    hit = _FP_CACHE.get(key)
+    if hit and hit.get("mtime") == mtime and hit.get("count") == count:
+        return hit["hash"], mtime, count, hit["size"]
+    fp, mtime, count, size = fingerprint(skill_dir)
+    _FP_CACHE[key] = {"hash": fp, "mtime": mtime, "count": count, "size": size}
+    return fp, mtime, count, size
+
+
+def save_fp_cache():
+    if _FP_CACHE is not None:
+        try:
+            save_json(FPCACHE_FILE, _FP_CACHE)
+        except Exception:
+            pass
+
+
+def is_self(name: str) -> bool:
+    return name == SELF_NAME
+
+
+def syncable(names):
+    """Drop skill-sync from anything that uploads or downloads."""
+    return [n for n in names if not is_self(n)]
+
+
 def local_skills(cfg=None):
     return sorted(local_skills_map(cfg).keys())
 
 
+def skill_path(name, cfg=None):
+    """Where a skill actually lives, or None.
+
+    Skills are discovered across several clients' folders (~/.claude, ~/.gemini,
+    .agents, plugin marketplaces), so anything that touches a skill on disk must ask
+    here. Assuming SKILLS_DIR/<name> silently misses skills installed in another client
+    and, on download, writes a second copy of one that already exists elsewhere.
+    """
+    return local_skills_map(cfg).get(name)
+
+
+def skill_dest_dir(name, cfg=None, default=None):
+    """Folder a downloaded skill belongs in: next to the copy already on this machine,
+    otherwise the primary skills dir."""
+    existing = skill_path(name, cfg)
+    if existing is not None:
+        return existing.parent
+    return default or SKILLS_DIR
+
+
 # ------------------------------------------------------------------ manifest
 
-def read_manifest(cfg):
-    code, out, err = rclone(["cat", rpath(cfg, MANIFEST_NAME)], check=False, timeout=90)
+def read_legacy_manifest(cfg):
+    """Entries from a manifest.legacy.json left by the manifest.d experiment."""
+    code, out, _err = rclone(["cat", rpath(cfg, MANIFEST_LEGACY_NAME)], check=False, timeout=90)
     if code != 0 or not out.strip():
-        return {"version": 1, "skills": {}}
+        return {}
     try:
-        m = json.loads(out)
+        return json.loads(out).get("skills", {}) or {}
     except json.JSONDecodeError:
-        raise SyncError(f"remote {MANIFEST_NAME} is corrupt at {rpath(cfg, MANIFEST_NAME)}; "
-                        f"fix or delete it before syncing")
-    m.setdefault("skills", {})
-    return m
+        return {}
+
+
+def read_split_manifest(cfg):
+    """Entries from a manifest.d/ directory, if a previous version left one behind."""
+    tmp = Path(tempfile.mkdtemp(prefix="skill-sync-manifest-"))
+    skills = {}
+    try:
+        code, _o, _e = rclone(["copy", rpath(cfg, MANIFEST_DIR), str(tmp), "--include", "*.json",
+                               "--transfers", "24", "--checkers", "24"],
+                              check=False, timeout=180)
+        if code == 0:
+            for f in sorted(tmp.glob("*.json")):
+                try:
+                    skills[f.stem] = json.loads(f.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    log(f"ignoring corrupt manifest entry {f.name}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return skills
+
+
+def read_manifest(cfg):
+    """The whole index in one request.
+
+    An earlier version split this into manifest.d/<skill>.json to stop two machines
+    overwriting each other's entries. On an API-backed remote that turned every single
+    command into one request per skill - 63 of them here, minutes of waiting - to avoid a
+    race that needs two machines writing within the same few seconds. The aggregate file
+    is read once and written with a read-merge-write, which is the right trade for this.
+    manifest.d is still read when the aggregate is missing, so a remote left in the split
+    layout keeps working and folds back on the next write.
+    """
+    with Spinner("reading the remote index"):
+        code, out, _err = rclone(["cat", rpath(cfg, MANIFEST_NAME)], check=False, timeout=90)
+        if code == 0 and out.strip():
+            try:
+                m = json.loads(out)
+            except json.JSONDecodeError:
+                raise SyncError(f"remote {MANIFEST_NAME} is corrupt at "
+                                f"{rpath(cfg, MANIFEST_NAME)}; fix or delete it before syncing")
+            m.setdefault("skills", {})
+            return m
+        # No aggregate: rebuild from whatever the older layouts left behind.
+        skills = dict(read_legacy_manifest(cfg))
+        skills.update(read_split_manifest(cfg))
+    return {"version": 2, "skills": skills}
 
 
 def write_manifest(cfg, entries: dict, drop=()):
-    """Re-read then merge per skill entry, so a concurrent machine is not clobbered."""
-    remote = read_manifest(cfg)
-    for name in drop:
-        remote["skills"].pop(name, None)
-    for name, entry in entries.items():
-        remote["skills"][name] = entry
-    remote["version"] = 1
-    remote["updated_at"] = now_iso()
-    rclone(["rcat", rpath(cfg, MANIFEST_NAME)],
-           stdin_data=json.dumps(remote, indent=2, ensure_ascii=False), timeout=120)
+    """Re-read, merge the changed entries, write the whole index back.
+
+    The merge is what keeps a concurrent machine's entry alive: only the skills named in
+    `entries` are replaced, everything else is carried over from whatever is on the remote
+    right now rather than from the copy this process read minutes ago.
+    """
+    with Spinner("updating the remote index"):
+        remote = read_manifest(cfg)
+        for name in drop:
+            remote["skills"].pop(name, None)
+        remote["skills"].update(entries)
+        remote["version"] = 2
+        remote["updated_at"] = now_iso()
+        rclone(["rcat", rpath(cfg, MANIFEST_NAME)],
+               stdin_data=json.dumps(remote, indent=2, ensure_ascii=False), timeout=120)
+
+        # Retire a split manifest.d once its contents are safely in the aggregate, so the
+        # slow path is never taken again.
+        code, _o, _e = rclone(["lsf", rpath(cfg, MANIFEST_DIR)], check=False, timeout=60)
+        if code == 0:
+            rclone(["purge", rpath(cfg, MANIFEST_DIR)], check=False, timeout=300)
+            log(f"consolidated {MANIFEST_DIR}/ back into {MANIFEST_NAME}")
     return remote
 
 
@@ -444,13 +739,22 @@ def compute_status(cfg, manifest=None):
     result = {}
 
     lmap = local_skills_map(cfg)
-    for name, skill_path in lmap.items():
-        fp, mtime, count, size = fingerprint(skill_path)
+    scanned = 0
+    for name, skill_dir in lmap.items():
+        # Hashing every skill takes a visible moment the first time, before the cache is
+        # warm. Say what is happening rather than freezing on a blank screen.
+        scanned += 1
+        progress_bar(scanned, len(lmap), f"scanning {name}")
+        fp, mtime, count, size = fingerprint_cached(skill_dir)
         prev = state["skills"].get(name, {})
         rem = remote_skills.get(name)
+        cats = entry_categories(rem) or list(prev.get("categories") or [])
+        if not cats and prev.get("category"):
+            cats = [prev["category"]]
         info = {
-            "name": name, "local": True, "local_path": str(skill_path), "remote": bool(rem),
+            "name": name, "local": True, "local_path": str(skill_dir), "remote": bool(rem),
             "category": (rem or {}).get("category") or prev.get("category"),
+            "categories": cats,
             "local_hash": fp, "remote_hash": (rem or {}).get("hash"),
             "synced_hash": prev.get("hash"),
             "mtime": mtime, "files": count, "size": size,
@@ -465,18 +769,27 @@ def compute_status(cfg, manifest=None):
             continue
         result[name] = {
             "name": name, "local": False, "local_path": None, "remote": True,
-            "category": rem.get("category"), "local_hash": None,
+            "category": primary_category(rem), "categories": entry_categories(rem),
+            "local_hash": None,
             "remote_hash": rem.get("hash"), "synced_hash": None,
             "mtime": 0, "files": rem.get("files", 0), "size": rem.get("size", 0),
             "remote_updated": rem.get("updated_at"), "remote_machine": rem.get("machine"),
             "state": ONLY_REMOTE,
         }
+    save_fp_cache()
     return result
 
 
 # -------------------------------------------------------------------- guards
 
 def scan_secrets(skill_dir: Path):
+    """Possible credentials as (relative_path, label, sample, line_number).
+
+    Reports the line so the user can look at it instead of taking the tool's word for it,
+    skips obvious documentation placeholders, and honours an inline pragma - otherwise one
+    fake key in a README pushes people towards --no-scan, which disables the check
+    entirely.
+    """
     hits = []
     for rel, path in iter_skill_files(skill_dir):
         if path.suffix.lower() not in SECRET_SCAN_EXT and path.name != ".env":
@@ -487,11 +800,22 @@ def scan_secrets(skill_dir: Path):
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for label, rx in SECRET_PATTERNS:
-            m = rx.search(text)
-            if m:
-                hits.append((rel, label, m.group(0)[:10] + "..."))
+        found = None
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if SECRET_ALLOW_PRAGMA in line:
+                continue
+            for label, rx in SECRET_PATTERNS:
+                m = rx.search(line)
+                if not m:
+                    continue
+                if PLACEHOLDER_RE.search(m.group(0)):
+                    continue
+                found = (rel, label, m.group(0)[:10] + "...", lineno)
                 break
+            if found:
+                break
+        if found:
+            hits.append(found)
     return hits
 
 
@@ -508,7 +832,8 @@ def push_skill(cfg, name, category, dry_run=False, skill_dir=None):
                 "--backup-dir", rpath(cfg, ".trash", stamp(), name)]
         if dry_run:
             args.append("--dry-run")
-        rclone(args, timeout=1800)
+        with Spinner(f"uploading {name} to {category}/"):
+            rclone(args, timeout=1800)
     finally:
         try:
             os.unlink(filt)
@@ -524,14 +849,16 @@ def pull_skill(cfg, name, category, dest_root: Path, dry_run=False):
             "--backup-dir", str(TRASH_DIR / stamp() / name)]
     if dry_run:
         args.append("--dry-run")
-    rclone(args, timeout=1800)
+    with Spinner(f"downloading {name}"):
+        rclone(args, timeout=1800)
     return dst
 
 
 def stash_remote_copy(cfg, name, category):
     dest = CONFLICTS_DIR / f"{name}-remote-{stamp()}"
     dest.mkdir(parents=True, exist_ok=True)
-    rclone(["copy", rpath(cfg, category, name), str(dest), "--checksum"], timeout=1800)
+    with Spinner(f"saving the remote copy of {name}"):
+        rclone(["copy", rpath(cfg, category, name), str(dest), "--checksum"], timeout=1800)
     return dest
 
 
@@ -542,9 +869,225 @@ def record_synced(name, category, hash_value, mtime, files):
     save_json(STATE_FILE, st)
 
 
-def manifest_entry(cfg, category, fp, size, files):
-    return {"category": category, "hash": fp, "size": size, "files": files,
-            "updated_at": now_iso(), "machine": cfg["machine"]}
+def entry_categories(entry) -> list:
+    """Every group a skill belongs to.
+
+    A skill can sit in more than one group - caveman is reasonably both `work` and
+    `personal`. Membership is the list; `category` remains the single group whose folder
+    physically holds the skill on the remote, so nothing has to be stored twice.
+    Entries written before this existed carry only `category`.
+    """
+    if not entry:
+        return []
+    cats = entry.get("categories")
+    if isinstance(cats, list) and cats:
+        return [c for c in cats if c]
+    return [entry["category"]] if entry.get("category") else []
+
+
+def primary_category(entry, fallback=None):
+    """The group whose folder holds the skill on the remote."""
+    if entry and entry.get("category"):
+        return entry["category"]
+    cats = entry_categories(entry)
+    return cats[0] if cats else fallback
+
+
+def manifest_entry(cfg, category, fp, size, files, categories=None):
+    cats = [c for c in (categories or [category]) if c]
+    if category and category not in cats:
+        cats.insert(0, category)
+    return {"category": category, "categories": cats, "hash": fp, "size": size,
+            "files": files, "updated_at": now_iso(), "machine": cfg["machine"]}
+
+
+STAMP_RE = re.compile(r"(\d{8}-\d{6})")
+
+
+def _stamp_age_days(name: str):
+    """Age of a backup folder, whose stamp sits at the start (trash) or the end
+    (conflicts, named `<skill>-remote-<stamp>`). None when there is no stamp to read -
+    those are left alone rather than guessed at."""
+    m = STAMP_RE.search(name or "")
+    if not m:
+        return None
+    try:
+        return (datetime.now() - datetime.strptime(m.group(1), "%Y%m%d-%H%M%S")).days
+    except ValueError:
+        return None
+
+
+def purge_backups(cfg=None):
+    """Delete replaced-file backups older than KEEP_TRASH_DAYS.
+
+    Local cleanup is filesystem-cheap and runs every time. The remote side is not: each
+    stale folder costs a listing and a recursive delete against the provider's API, and
+    running that after every push made a one-file upload take minutes. So the remote sweep
+    happens once a day at most, and only clears a few folders per run - they are not
+    urgent, and the next sync picks up where this one stopped.
+    """
+    for root in (TRASH_DIR, CONFLICTS_DIR):
+        if not root.exists():
+            continue
+        for entry in root.iterdir():
+            age = _stamp_age_days(entry.name)
+            if age is not None and age > KEEP_TRASH_DAYS:
+                shutil.rmtree(entry, ignore_errors=True)
+    if not cfg:
+        return
+
+    st = load_state()
+    if time.time() - float(st.get("trash_swept_at") or 0) < REMOTE_TRASH_SWEEP_INTERVAL:
+        return
+    st = load_state()
+    st["trash_swept_at"] = time.time()
+    save_json(STATE_FILE, st)
+
+    code, out, _e = rclone(["lsf", rpath(cfg, ".trash"), "--dirs-only"], check=False, timeout=60)
+    if code != 0:
+        return
+    stale = [line.strip().strip("/") for line in out.splitlines()]
+    stale = [n for n in stale
+             if (_stamp_age_days(n) or 0) > KEEP_TRASH_DAYS]
+    for name in sorted(stale)[:REMOTE_TRASH_SWEEP_MAX]:
+        rclone(["purge", rpath(cfg, ".trash", name)], check=False, timeout=120)
+    if len(stale) > REMOTE_TRASH_SWEEP_MAX:
+        log(f"trash sweep: {len(stale) - REMOTE_TRASH_SWEEP_MAX} folders left for next time")
+
+
+def trash_size_bytes():
+    total = 0
+    for root in (TRASH_DIR, CONFLICTS_DIR):
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            try:
+                if path.is_file():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+# ------------------------------------------------------------------- updates
+
+def local_version() -> str:
+    try:
+        return VERSION_FILE.read_text(encoding="utf-8").strip() or "0"
+    except OSError:
+        return "0"
+
+
+def _version_key(v: str):
+    """Compare 2.10.0 above 2.9.0, and never raise on something unparseable."""
+    parts = []
+    for chunk in re.split(r"[.\-+]", (v or "").strip().lstrip("vV")):
+        parts.append(int(chunk) if chunk.isdigit() else 0)
+    return tuple(parts + [0] * (4 - len(parts)))[:4]
+
+
+def fetch_latest_version(timeout=4):
+    """(version, reason). Version is None when it could not be read.
+
+    Deliberately never raises: a version check is a convenience and must not stand between
+    the user and their skills. The reason separates "no VERSION published yet" from "no
+    network", because the fix is completely different.
+    """
+    import urllib.error
+    import urllib.request
+    try:
+        req = urllib.request.Request(VERSION_URL, headers={"User-Agent": "skill-sync"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", "replace").strip()
+        return (text, None) if text else (None, "the published VERSION file is empty")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None, (f"no VERSION file published at {VERSION_URL} yet - update "
+                          f"checking starts working once one is pushed")
+        return None, f"GitHub answered {e.code}"
+    except Exception as e:
+        log(f"update check failed: {e!r}")
+        return None, f"could not reach GitHub ({e.__class__.__name__})"
+
+
+def update_available(force=False, timeout=4):
+    """(latest, is_newer, reason) using a cached answer, checked at most once a day."""
+    st = load_state()
+    cached = st.get("update_check") or {}
+    fresh = time.time() - float(cached.get("at") or 0) < UPDATE_CHECK_INTERVAL
+    reason = None
+    if not force and fresh and cached.get("latest"):
+        latest = cached["latest"]
+    else:
+        latest, reason = fetch_latest_version(timeout=timeout)
+        if latest:
+            st = load_state()
+            st["update_check"] = {"at": time.time(), "latest": latest}
+            save_json(STATE_FILE, st)
+        elif cached.get("latest"):
+            latest = cached["latest"]                # stale, but better than nothing
+    if not latest:
+        return None, False, reason
+    return latest, _version_key(latest) > _version_key(local_version()), reason
+
+
+def cmd_update(args):
+    """Replace this skill with the published version, keeping a backup."""
+    import urllib.request
+    import zipfile
+
+    here = VERSION_FILE.parent
+    latest, newer, reason = update_available(force=True, timeout=10)
+    if latest is None:
+        raise SyncError(f"cannot check for updates: {reason or 'unknown error'}")
+    print(f"installed: {local_version()}    published: {latest}")
+    if not newer and not args.force:
+        print("Already up to date.")
+        return 0
+    if args.check:
+        print(f"An update is available. Install it with: python sync.py update")
+        return 0
+
+    tmp = Path(tempfile.mkdtemp(prefix="skill-sync-update-"))
+    try:
+        archive = tmp / "main.zip"
+        with Spinner(f"downloading {latest}"):
+            req = urllib.request.Request(ARCHIVE_URL, headers={"User-Agent": "skill-sync"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                archive.write_bytes(resp.read())
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(tmp)
+
+        roots = [p for p in tmp.iterdir() if p.is_dir()]
+        if len(roots) != 1:
+            raise SyncError(f"unexpected archive layout from {ARCHIVE_URL}")
+        source = roots[0]
+        if not (source / "SKILL.md").exists():
+            raise SyncError("the downloaded archive does not look like skill-sync")
+
+        # Keep the whole current copy before writing over it: this is the one operation
+        # that can break the tool doing the operating.
+        backup = TRASH_DIR / f"{stamp()}-{SELF_NAME}-{local_version()}"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(here, backup, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", ".git"))
+        print(f"current version backed up to: {backup}")
+
+        copied = 0
+        for src in source.rglob("*"):
+            if src.is_dir() or any(part in (".git", "__pycache__") for part in src.parts):
+                continue
+            dst = here / src.relative_to(source)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied += 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print(f"Updated to {latest} ({copied} files).")
+    print("Restart the menu, and Claude Code, so the new version is loaded.")
+    log(f"updated {local_version()} -> {latest}")
+    return 0
 
 
 # ------------------------------------------------------------------ commands
@@ -619,12 +1162,19 @@ def cmd_status(args):
     if not st:
         print("No skills found locally or on the remote.")
         return 0
+    # Grouped by category, not one flat alphabetical list: the category is what decides
+    # which machines pull a skill, so it is the axis worth reading down.
     w = max(len(n) for n in st)
-    print(f"{'SKILL'.ljust(w)}  {'CATEGORY'.ljust(14)}  STATE")
-    print("-" * (w + 34))
-    for name in sorted(st):
-        i = st[name]
-        print(f"{name.ljust(w)}  {(i['category'] or '-').ljust(14)}  {i['state']}")
+    by_cat = {}
+    for name, i in st.items():
+        for cat in i.get("categories") or [i["category"] or NO_CATEGORY]:
+            by_cat.setdefault(cat, []).append(name)
+    for cat in sorted(by_cat):
+        print(f"{cat} ({len(by_cat[cat])})")
+        print("-" * (w + 12))
+        for name in sorted(by_cat[cat]):
+            print(f"  {name.ljust(w)}  {st[name]['state']}")
+        print()
 
     uncategorised = [n for n, i in st.items() if i["local"] and not i["category"]]
     conflicts = [n for n, i in st.items() if i["state"] == CONFLICT]
@@ -652,9 +1202,12 @@ def cmd_push(args):
     with Lock():
         manifest = read_manifest(cfg)
         st = compute_status(cfg, manifest)
-        targets = args.skills or [n for n, i in st.items() if i["local"]]
+        targets = syncable(args.skills or [n for n, i in st.items() if i["local"]])
 
         to_push, skipped, conflicts, uncategorised = [], [], [], []
+        if args.skills and any(is_self(n) for n in args.skills):
+            skipped.append((SELF_NAME, f"managed from {REPO_URL}, not through the remote "
+                                       f"(python sync.py update)"))
         for name in targets:
             i = st.get(name)
             if not i or not i["local"]:
@@ -668,11 +1221,16 @@ def cmd_push(args):
                 continue
             if i["state"] == IN_SYNC and not args.force:
                 continue
-            category = i["category"] or (cfg["default_category"] if args.assume_default else None)
+            cats = list(i.get("categories") or [])
+            category = i["category"] or (cats[0] if cats else None)
+            if not category and args.assume_default:
+                category = cfg["default_category"]
             if not category:
                 uncategorised.append(name)
                 continue
-            to_push.append((name, category, i))
+            if category not in cats:
+                cats.insert(0, category)
+            to_push.append((name, category, i, cats))
 
         if not getattr(args, "json", False):
             for name in uncategorised:
@@ -692,7 +1250,7 @@ def cmd_push(args):
 
         if not args.no_scan:
             blocked = []
-            for name, _cat, i in to_push:
+            for name, _cat, i, _cats in to_push:
                 sp = Path(i["local_path"]) if i.get("local_path") else (SKILLS_DIR / name)
                 hits = scan_secrets(sp)
                 if hits:
@@ -703,40 +1261,80 @@ def cmd_push(args):
                 else:
                     print("\nPossible credentials found - nothing was uploaded:")
                     for name, hits in blocked:
-                        for rel, label, sample in hits:
-                            print(f"  {name}/{rel}: {label} ({sample})")
-                    print("Remove the secret, or re-run with --no-scan if it is a false positive.")
+                        for rel, label, sample, lineno in hits:
+                            print(f"  {name}/{rel}:{lineno}: {label} ({sample})")
+                    print(f"Remove the secret, or mark that line with `{SECRET_ALLOW_PRAGMA}` "
+                          f"in a comment if it is a false positive. `--no-scan` drops the "
+                          f"check for the whole push.")
                 return 1
 
         entries = {}
-        uploaded_names = []
-        for name, category, i in to_push:
-            sp = Path(i["local_path"]) if i.get("local_path") else (SKILLS_DIR / name)
-            if i["size"] > BIG_SKILL_BYTES and not getattr(args, "json", False):
-                print(f"note: {name} is {human_size(i['size'])} - upload may be slow")
-            if not getattr(args, "json", False):
-                print(f"push {name} -> {category}/ ({i['files']} files, {human_size(i['size'])})")
-            push_skill(cfg, name, category, dry_run=args.dry_run, skill_dir=sp)
-            if not args.dry_run:
-                entries[name] = manifest_entry(cfg, category, i["local_hash"], i["size"], i["files"])
-                uploaded_names.append(name)
+        done = []
+        deferred = []
+        deadline = getattr(args, "deadline", None)
+        if deadline is None and getattr(args, "budget_seconds", None):
+            deadline = time.monotonic() + args.budget_seconds
+        json_out = getattr(args, "json", False)
+        total = len(to_push)
+        try:
+            for n, (name, category, i, cats) in enumerate(to_push, 1):
+                # Always attempt the first one, so a budget smaller than a single upload
+                # defers forever instead of making progress.
+                if deadline and done and time.monotonic() > deadline:
+                    deferred = [x[0] for x in to_push[n - 1:]]
+                    break
+                sp = Path(i["local_path"]) if i.get("local_path") else (SKILLS_DIR / name)
+                detail = f"{name} -> {category}/ ({i['files']} files, {human_size(i['size'])})"
+                if not json_out:
+                    if i["size"] > BIG_SKILL_BYTES:
+                        print(f"note: {name} is {human_size(i['size'])} - upload may be slow")
+                    if _interactive():
+                        progress_bar(n - 1, total, detail)
+                    else:
+                        print(f"push [{n}/{total}] {detail}")
+                push_skill(cfg, name, category, dry_run=args.dry_run, skill_dir=sp)
+                if not json_out and _interactive():
+                    progress_bar(n, total, f"{name} done")
+                if not args.dry_run:
+                    entries[name] = manifest_entry(cfg, category, i["local_hash"],
+                                                   i["size"], i["files"], categories=cats)
+                    done.append((name, category, i))
+        finally:
+            # An upload can be interrupted, or killed by the Stop hook's timeout, after
+            # files already landed on the remote. Record what did land, or the manifest
+            # keeps claiming the old hash and the next run re-uploads everything.
+            if entries:
+                write_manifest(cfg, entries)
+                for name, category, i in done:
+                    record_synced(name, category, i["local_hash"], i["mtime"], i["files"])
+                log(f"push {sorted(entries)}")
 
         if args.dry_run:
-            if getattr(args, "json", False):
-                print(json.dumps({"status": "dry_run", "would_upload": [n for n, _, _ in to_push]}))
+            if json_out:
+                print(json.dumps({"status": "dry_run",
+                                  "would_upload": [n for n, _c, _i, _cs in to_push]}))
             else:
-                print(f"(dry-run) {len(to_push)} skill(s) would be uploaded.")
+                print(f"(dry-run) {total} skill(s) would be uploaded.")
             return 0
 
-        write_manifest(cfg, entries)
-        for name, category, i in to_push:
-            record_synced(name, category, i["local_hash"], i["mtime"], i["files"])
-
-        if getattr(args, "json", False):
-            print(json.dumps({"status": "ok", "uploaded": uploaded_names}))
+        if json_out:
+            print(json.dumps({"status": "ok", "uploaded": [n for n, _, _ in done],
+                              "deferred": deferred}))
         else:
-            print(f"Uploaded {len(entries)} skill(s) to {base_path(cfg)}")
-        log(f"push {sorted(entries)}")
+            print(f"\nUploaded {len(entries)} skill(s) to {base_path(cfg)}:")
+            for name, category, i in done:
+                print(f"  {name}  ->  {category}/  "
+                      f"({i['files']} files, {human_size(i['size'])})")
+            if skipped:
+                print(f"Skipped {len(skipped)}: "
+                      f"{', '.join(n for n, _why in skipped[:6])}"
+                      f"{' ...' if len(skipped) > 6 else ''}")
+            if deferred:
+                print(f"Ran out of time; {len(deferred)} left for next time: "
+                      f"{', '.join(deferred[:5])}{' ...' if len(deferred) > 5 else ''}")
+        if deferred:
+            log(f"push deferred {deferred}")
+        purge_backups(cfg)
         return 0
 
 
@@ -744,7 +1342,7 @@ def cmd_pull(args):
     cfg = require_config()
     with Lock():
         manifest = read_manifest(cfg)
-        remote_skills = manifest.get("skills", {})
+        remote_skills = {n: e for n, e in manifest.get("skills", {}).items() if not is_self(n)}
         if not remote_skills:
             print(f"The remote {base_path(cfg)} has no skills yet. Run `push` on a machine "
                   f"that has them.")
@@ -754,7 +1352,8 @@ def cmd_pull(args):
             print("Categories on the remote:\n")
             by_cat = {}
             for n, e in remote_skills.items():
-                by_cat.setdefault(e.get("category") or NO_CATEGORY, []).append(n)
+                for c in entry_categories(e) or [NO_CATEGORY]:
+                    by_cat.setdefault(c, []).append(n)
             for cat in sorted(by_cat):
                 print(f"  {cat} ({len(by_cat[cat])}): {', '.join(sorted(by_cat[cat]))}")
             print("\nPull what you want on this machine:")
@@ -762,95 +1361,159 @@ def cmd_pull(args):
             print("    python sync.py pull --skills <skill> [...]")
             return 2
 
-        dest_root = Path(args.dest).expanduser() if args.dest else SKILLS_DIR
-        dest_root.mkdir(parents=True, exist_ok=True)
-        into_skills_dir = dest_root.resolve() == SKILLS_DIR.resolve()
+        # --dest pins one folder (used by tests and for staging). Without it each skill
+        # goes back where this machine already keeps it - writing everything into
+        # SKILLS_DIR created a second copy of skills installed under another client.
+        explicit_dest = Path(args.dest).expanduser() if args.dest else None
+        if explicit_dest:
+            explicit_dest.mkdir(parents=True, exist_ok=True)
         st = compute_status(cfg, manifest)
 
         wanted = []
         for n in (args.skills or []):
-            if n not in remote_skills:
+            if is_self(n):
+                print(f"skipped {n}: managed from {REPO_URL} (python sync.py update)")
+            elif n not in remote_skills:
                 print(f"skipped {n}: not on the remote")
             elif n not in wanted:
                 wanted.append(n)
         for n, e in remote_skills.items():
-            if args.categories and (e.get("category") or NO_CATEGORY) in args.categories \
-                    and n not in wanted:
+            member_of = set(entry_categories(e)) or {NO_CATEGORY}
+            if args.categories and member_of & set(args.categories) and n not in wanted:
                 wanted.append(n)
         if args.categories:
-            unknown = set(args.categories) - {(e.get("category") or NO_CATEGORY)
-                                              for e in remote_skills.values()}
+            known = set()
+            for e in remote_skills.values():
+                known |= set(entry_categories(e)) or {NO_CATEGORY}
+            unknown = set(args.categories) - known
             for c in sorted(unknown):
                 print(f"note: no category named '{c}' on the remote")
 
-        pulled, conflicts = [], []
-        for name in sorted(wanted):
+        pulled, conflicts, skipped_in_sync = [], [], []
+        total_wanted = len(wanted)
+        for n, name in enumerate(sorted(wanted), 1):
             i = st.get(name, {})
-            category = remote_skills[name].get("category") or NO_CATEGORY
+            category = primary_category(remote_skills[name], NO_CATEGORY)
+            dest_root = explicit_dest or skill_dest_dir(name, cfg)
+            into_skills_dir = explicit_dest is None
             if into_skills_dir and not args.force:
                 if i.get("state") == CONFLICT:
                     conflicts.append(name)
                     continue
                 if i.get("state") == IN_SYNC:
+                    skipped_in_sync.append(name)
                     continue
                 if i.get("state") == LOCAL_NEW:
                     print(f"skipped {name}: your local copy is newer (push it, or pull --force)")
                     continue
-            print(f"pull {category}/{name}")
+            dest_root.mkdir(parents=True, exist_ok=True)
+            if _interactive():
+                progress_bar(n - 1, total_wanted, f"{category}/{name} -> {dest_root}")
+            else:
+                print(f"pull [{n}/{total_wanted}] {category}/{name} -> {dest_root}")
             pull_skill(cfg, name, category, dest_root, dry_run=args.dry_run)
-            pulled.append((name, category))
+            if _interactive():
+                progress_bar(n, total_wanted, f"{name} done")
+            pulled.append((name, category, dest_root))
 
         for name in conflicts:
             print(f"CONFLICT: {name}  -> python sync.py resolve {name} --keep local|remote")
 
         if args.dry_run:
-            print(f"(dry-run) {len(pulled)} skill(s) would be written to {dest_root}")
+            print(f"(dry-run) {len(pulled)} skill(s) would be downloaded")
             return 0
 
-        if into_skills_dir:
-            for name, category in pulled:
-                fp, mtime, files, _size = fingerprint(SKILLS_DIR / name)
+        if explicit_dest is None:
+            for name, category, dest_root in pulled:
+                fp, mtime, files, _size = fingerprint(dest_root / name)
                 record_synced(name, category, fp, mtime, files)
             if args.categories:
                 cfg["categories"] = sorted(set(cfg.get("categories", [])) | set(args.categories))
                 save_json(CONFIG_FILE, cfg)
 
-        print(f"{len(pulled)} skill(s) written to {dest_root}")
-        if pulled and into_skills_dir:
+        if pulled:
+            print(f"\nDownloaded {len(pulled)} skill(s):")
+            for name, category, dest_root in pulled:
+                print(f"  {category}/{name}  ->  {dest_root / name}")
+        else:
+            print("\nNothing to download.")
+        if skipped_in_sync:
+            print(f"Already up to date ({len(skipped_in_sync)}): "
+                  f"{', '.join(skipped_in_sync[:6])}"
+                  f"{' ...' if len(skipped_in_sync) > 6 else ''}")
+        if pulled and explicit_dest is None:
             print("Restart Claude Code so it discovers the new skills.")
-        log(f"pull {[n for n, _ in pulled]} -> {dest_root}")
+        log(f"pull {[n for n, _, _ in pulled]}")
+        purge_backups(cfg)
         return 0 if not conflicts else 1
 
 
 def cmd_categorize(args):
+    """Set, add to, or remove from a skill's groups.
+
+    Groups are membership, not a location: adding `work` to a skill that is already in
+    `personal` leaves it in both. Only the primary group - the first one - decides which
+    folder physically holds the skill on the remote, so a plain add never moves data.
+    """
     cfg = require_config()
-    name, new_cat = args.skill, args.category.strip()
+    name = args.skill
+    asked = [c.strip() for c in args.categories if c and c.strip()]
+    if not asked:
+        raise SyncError("give at least one group name")
     if name not in local_skills_map(cfg) and not args.force:
         raise SyncError(f"skill '{name}' not found in any skills dir (use --force for a "
                         f"remote-only skill)")
+
     manifest = read_manifest(cfg)
     entry = manifest["skills"].get(name)
-    old_cat = (entry or {}).get("category")
+    current = entry_categories(entry)
+    if not current:
+        current = list((load_state()["skills"].get(name) or {}).get("categories") or [])
 
-    if entry and old_cat and old_cat != new_cat:
-        code, _o, _e = rclone(["lsf", rpath(cfg, old_cat, name), "--max-depth", "1"],
-                              check=False, timeout=90)
-        if code == 0:
-            print(f"moving remote {old_cat}/{name} -> {new_cat}/{name}")
-            rclone(["moveto", rpath(cfg, old_cat, name), rpath(cfg, new_cat, name)], timeout=1800)
-        entry["category"] = new_cat
+    if args.add:
+        new_cats = current + [c for c in asked if c not in current]
+    elif args.remove:
+        new_cats = [c for c in current if c not in asked]
+    else:
+        new_cats = list(dict.fromkeys(asked))
+
+    if not new_cats:
+        raise SyncError(f"that would leave {name} in no group at all; assign another one "
+                        f"first, or use `prune` to remove it from the remote")
+
+    old_primary = primary_category(entry)
+    new_primary = new_cats[0]
+
+    if entry:
+        # Only a change of primary moves anything: membership alone is metadata.
+        if old_primary and old_primary != new_primary:
+            code, _o, _e = rclone(["lsf", rpath(cfg, old_primary, name), "--max-depth", "1"],
+                                  check=False, timeout=90)
+            if code == 0:
+                with Spinner(f"moving {name}: {old_primary}/ -> {new_primary}/"):
+                    rclone(["moveto", rpath(cfg, old_primary, name),
+                            rpath(cfg, new_primary, name)], timeout=1800)
+        entry["category"] = new_primary
+        entry["categories"] = new_cats
         entry["updated_at"] = now_iso()
         write_manifest(cfg, {name: entry})
 
     st = load_state()
-    st["skills"].setdefault(name, {})["category"] = new_cat
+    record = st["skills"].setdefault(name, {})
+    record["category"] = new_primary
+    record["categories"] = new_cats
     save_json(STATE_FILE, st)
 
-    if new_cat not in cfg.get("categories", []):
-        cfg["categories"] = sorted(cfg.get("categories", []) + [new_cat])
+    missing = [c for c in new_cats if c not in cfg.get("categories", [])]
+    if missing:
+        cfg["categories"] = sorted(set(cfg.get("categories", [])) | set(missing))
         save_json(CONFIG_FILE, cfg)
 
-    print(f"{name} -> category '{new_cat}'")
+    if sorted(new_cats) == sorted(current):
+        print(f"{name} is already in: {', '.join(new_cats)}")
+    else:
+        print(f"{name} -> groups: {', '.join(new_cats)}"
+              + (f"   (stored under {new_primary}/)" if len(new_cats) > 1 else ""))
     if not entry:
         print(f"not uploaded yet: python sync.py push {name}")
     return 0
@@ -921,28 +1584,37 @@ def cmd_resolve(args):
         entry = manifest["skills"].get(name)
         if not entry:
             raise SyncError(f"{name} is not on the remote - nothing to resolve")
-        category = entry.get("category") or NO_CATEGORY
+        category = primary_category(entry, NO_CATEGORY)
+        categories = entry_categories(entry) or [category]
+
+        # The skill may live under any client's folder, not just SKILLS_DIR.
+        local_dir = skill_path(name, cfg)
 
         if args.keep == "local":
-            if not (SKILLS_DIR / name).exists():
-                raise SyncError(f"{name} does not exist locally")
+            if local_dir is None:
+                raise SyncError(f"{name} does not exist in any local skills dir")
             backup = stash_remote_copy(cfg, name, category)
             print(f"remote version saved to: {backup}")
-            fp, mtime, files, size = fingerprint(SKILLS_DIR / name)
-            push_skill(cfg, name, category)
-            write_manifest(cfg, {name: manifest_entry(cfg, category, fp, size, files)})
+            with Spinner(f"hashing {name}"):
+                fp, mtime, files, size = fingerprint(local_dir)
+            push_skill(cfg, name, category, skill_dir=local_dir)
+            write_manifest(cfg, {name: manifest_entry(cfg, category, fp, size, files,
+                                                      categories=categories)})
             record_synced(name, category, fp, mtime, files)
             print(f"resolved: LOCAL version of {name} is now on the remote")
         else:
-            if (SKILLS_DIR / name).exists():
+            dest_root = skill_dest_dir(name, cfg)
+            if local_dir is not None:
                 backup = CONFLICTS_DIR / f"{name}-local-{stamp()}"
                 backup.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(SKILLS_DIR / name, backup, dirs_exist_ok=True)
+                shutil.copytree(local_dir, backup, dirs_exist_ok=True)
                 print(f"local version saved to: {backup}")
-            pull_skill(cfg, name, category, SKILLS_DIR)
-            fp, mtime, files, _size = fingerprint(SKILLS_DIR / name)
+            dest_root.mkdir(parents=True, exist_ok=True)
+            pull_skill(cfg, name, category, dest_root)
+            with Spinner(f"hashing {name}"):
+                fp, mtime, files, _size = fingerprint(dest_root / name)
             record_synced(name, category, fp, mtime, files)
-            print(f"resolved: REMOTE version of {name} is now local")
+            print(f"resolved: REMOTE version of {name} is now local ({dest_root / name})")
         log(f"resolve {name} keep={args.keep}")
         return 0
 
@@ -976,7 +1648,7 @@ def cmd_prune(args):
             return 2
 
         for n in targets:
-            category = manifest["skills"][n].get("category") or NO_CATEGORY
+            category = primary_category(manifest["skills"][n], NO_CATEGORY)
             print(f"deleting remote {category}/{n}")
             rclone(["purge", rpath(cfg, category, n)], check=False, timeout=900)
         write_manifest(cfg, {}, drop=targets)
@@ -1001,6 +1673,7 @@ def cmd_doctor(args):
 
     if getattr(args, "json", False):
         print(json.dumps({
+            "version": local_version(),
             "skills_dirs": [str(d) for d in s_dirs],
             "total_skills": len(local_skills(cfg)),
             "state_dir": str(STATE_DIR),
@@ -1008,10 +1681,13 @@ def cmd_doctor(args):
             "has_config": bool(cfg),
             "stop_hook": "hook-stop" in hooks,
             "session_start_hook": "hook-session-start" in hooks,
-            "lock_exists": LOCK_FILE.exists()
+            "lock_exists": LOCK_FILE.exists(),
+            "lock_live": lock_is_live(),
+            "trash_bytes": trash_size_bytes(),
         }, indent=2, ensure_ascii=False))
         return 0
 
+    print(f"version        : {local_version()}")
     print(f"skills dirs    : {dirs_str} "
           f"({len(local_skills(cfg))} total skills)")
     print(f"state dir      : {STATE_DIR}")
@@ -1043,12 +1719,17 @@ def cmd_doctor(args):
     if "hook-stop" not in hooks:
         print("                 -> python scripts/install_hooks.py")
     if LOCK_FILE.exists():
-        print(f"lock           : present ({LOCK_FILE}) - delete it if no sync is running")
+        if lock_is_live():
+            print(f"lock           : held by a running sync ({LOCK_FILE})")
+        else:
+            print(f"lock           : stale ({LOCK_FILE}) - the next run clears it by itself")
+    held = trash_size_bytes()
+    if held:
+        print(f"backups        : {human_size(held)} in {TRASH_DIR.parent} "
+              f"(deleted after {KEEP_TRASH_DAYS} days)")
     print(f"log            : {LOG_FILE}")
     return 0 if ok else 1
 
-
-import difflib
 
 def cmd_merge(args):
     cfg = require_config()
@@ -1058,7 +1739,7 @@ def cmd_merge(args):
     if not entry:
         raise SyncError(f"skill '{name}' is not present on the remote")
 
-    category = entry.get("category") or NO_CATEGORY
+    category = primary_category(entry, NO_CATEGORY)
     lmap = local_skills_map(cfg)
     local_dir = lmap.get(name)
     if not local_dir:
@@ -1113,7 +1794,7 @@ def changed_since_state():
     """Skills whose cheap signature differs from the last recorded sync."""
     st = load_state()
     changed = []
-    lmap = local_skills_map()
+    lmap = {n: p for n, p in local_skills_map().items() if not is_self(n)}
     for name, skill_path in lmap.items():
         prev = st["skills"].get(name)
         mtime, count = quick_sig(skill_path)
@@ -1129,13 +1810,20 @@ def cmd_hook_stop(args):
     cfg = load_config()
     if not cfg or not shutil.which("rclone"):
         return 0
-    if LOCK_FILE.exists():
-        return 0
+    if lock_is_live():
+        return 0                                 # a real sync is running; it will cover this
     changed = changed_since_state()
     if not changed:
         return 0
+    sizes = {n: (skill_path(n, cfg) and fingerprint_cached(skill_path(n, cfg))[3]) or 0
+             for n in changed}
+    changed.sort(key=lambda n: sizes[n])
+    # Closing a session must not hang on a slow link. Smallest first, within a budget;
+    # whatever does not fit is named in the log and goes up next time.
+    budget = float(cfg.get("hook_budget_seconds") or HOOK_BUDGET_SECONDS)
     ns = argparse.Namespace(skills=changed, dry_run=False, force=False, no_scan=False,
-                            json=False, assume_default=bool(cfg.get("auto_default_category", True)))
+                            json=False, deadline=time.monotonic() + budget,
+                            assume_default=bool(cfg.get("auto_default_category", True)))
     try:
         cmd_push(ns)
     except SyncError as e:
@@ -1167,7 +1855,7 @@ def cmd_hook_session_start(args):
     local = set(local_skills(cfg))
     new, updated = [], []
     for name, e in manifest.get("skills", {}).items():
-        if subscribed and e.get("category") not in subscribed:
+        if subscribed and not (set(entry_categories(e)) & subscribed):
             continue
         if name not in local:
             new.append(name)
@@ -1215,7 +1903,10 @@ def build_parser():
     s.add_argument("--assume-default", action="store_true",
                    help="use the default category for skills without one")
     s.add_argument("--json", action="store_true", help="machine readable output")
-    s.set_defaults(func=cmd_push)
+    s.add_argument("--budget", type=float, dest="budget_seconds",
+                   help="stop starting new uploads after this many seconds; the rest go "
+                        "on the next run")
+    s.set_defaults(func=cmd_push, deadline=None)
 
     s = sub.add_parser("pull", help="download skills by category")
     s.add_argument("categories", nargs="*")
@@ -1225,9 +1916,12 @@ def build_parser():
     s.add_argument("--force", action="store_true", help="overwrite the local copy")
     s.set_defaults(func=cmd_pull)
 
-    s = sub.add_parser("categorize", help="set or move a skill's category")
+    s = sub.add_parser("categorize", help="set, add or remove a skill's groups")
     s.add_argument("skill")
-    s.add_argument("category")
+    s.add_argument("categories", nargs="+", metavar="category",
+                   help="the skill's groups; the first one holds it on the remote")
+    s.add_argument("--add", action="store_true", help="add to the groups it is already in")
+    s.add_argument("--remove", action="store_true", help="remove these groups, keep the rest")
     s.add_argument("--force", action="store_true", help="allow a remote-only skill")
     s.set_defaults(func=cmd_categorize)
 
@@ -1258,6 +1952,11 @@ def build_parser():
     s = sub.add_parser("doctor", help="diagnose setup problems")
     s.add_argument("--json", action="store_true", help="machine readable output")
     s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("update", help=f"update skill-sync itself from {REPO_URL}")
+    s.add_argument("--check", action="store_true", help="only report whether one is available")
+    s.add_argument("--force", action="store_true", help="reinstall even if already current")
+    s.set_defaults(func=cmd_update)
 
     s = sub.add_parser("hook-stop", help="internal: auto-push when a session ends")
     s.add_argument("--quiet", action="store_true")

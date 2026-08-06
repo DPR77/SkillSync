@@ -28,7 +28,12 @@ HERE = Path(__file__).resolve().parent
 SYNC_SCRIPT = HERE / "sync.py"
 SETTINGS = Path.home() / ".claude" / "settings.json"
 
-MARKER = "skill-sync"          # identifies our hooks for update/uninstall
+# An explicit key on the group, not a substring match on the whole JSON: any hook whose
+# command merely mentioned skill-sync (a backup script, a lint rule, the user's own
+# wrapper) was treated as ours and deleted on install or uninstall.
+MARKER_KEY = "_installedBy"
+MARKER = "skill-sync"
+LEGACY_MARKER = "skill-sync"   # still recognised so hooks written by older versions get replaced
 STOP_TIMEOUT = 120
 SESSION_TIMEOUT = 20
 
@@ -53,20 +58,37 @@ def hook_command(subcommand: str) -> str:
 
 
 def is_ours(entry: dict) -> bool:
-    return MARKER in json.dumps(entry)
+    """Only groups this script wrote.
+
+    Tagged groups are ours by definition. Untagged ones are only claimed when their
+    command actually invokes our sync.py subcommands, which is how hooks written before
+    the tag existed are recognised without swallowing unrelated hooks.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get(MARKER_KEY) == MARKER:
+        return True
+    for hook in entry.get("hooks", []):
+        command = str((hook or {}).get("command", ""))
+        if LEGACY_MARKER in command and ("hook-stop" in command
+                                         or "hook-session-start" in command):
+            return True
+    return False
 
 
 def install(settings: dict) -> dict:
     hooks = settings.setdefault("hooks", {})
 
     stop = [g for g in hooks.get("Stop", []) if not is_ours(g)]
-    stop.append({"hooks": [{"type": "command",
+    stop.append({MARKER_KEY: MARKER,
+                 "hooks": [{"type": "command",
                             "command": hook_command("hook-stop"),
                             "timeout": STOP_TIMEOUT}]})
     hooks["Stop"] = stop
 
     start = [g for g in hooks.get("SessionStart", []) if not is_ours(g)]
-    start.append({"matcher": "startup|resume",
+    start.append({MARKER_KEY: MARKER,
+                  "matcher": "startup|resume",
                   "hooks": [{"type": "command",
                              "command": hook_command("hook-session-start"),
                              "timeout": SESSION_TIMEOUT}]})

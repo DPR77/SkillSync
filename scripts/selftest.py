@@ -27,6 +27,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SYNC = HERE / "sync.py"
 
+
+def menu_visible_len(line: str) -> int:
+    """menu.py's own width calculation, so the UI checks measure what it measures."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_menu_for_test", HERE / "menu.py")
+    module = sys.modules.get("_menu_for_test")
+    if module is None:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["_menu_for_test"] = module
+        spec.loader.exec_module(module)
+    return module.visible_len(line)
+
 PASS, FAIL = "PASS", "FAIL"
 results = []
 
@@ -38,16 +50,24 @@ def check(name: str, condition: bool, detail: str = ""):
 
 
 class Machine:
-    def __init__(self, root: Path, name: str):
+    def __init__(self, root: Path, name: str, extra_skill_dirs: int = 0):
         self.name = name
         self.skills = root / name / "skills"
         self.state = root / name / "state"
         self.skills.mkdir(parents=True, exist_ok=True)
         self.state.mkdir(parents=True, exist_ok=True)
+        # Real machines keep skills in several clients' folders (~/.claude, ~/.gemini,
+        # .agents). Anything that writes a skill has to respect where it already lives.
+        self.other_skills = []
+        for n in range(extra_skill_dirs):
+            d = root / name / f"skills{n + 2}"
+            d.mkdir(parents=True, exist_ok=True)
+            self.other_skills.append(d)
 
     def env(self):
         e = dict(os.environ)
-        e["CLAUDE_SKILLS_DIR"] = str(self.skills)
+        e["CLAUDE_SKILLS_DIR"] = os.pathsep.join(
+            [str(self.skills)] + [str(d) for d in self.other_skills])
         e["SKILL_SYNC_HOME"] = str(self.state)
         e["PYTHONIOENCODING"] = "utf-8"
         return e
@@ -60,8 +80,9 @@ class Machine:
             print(f"    (unexpected exit {proc.returncode}, wanted {expect})\n{out}")
         return proc.returncode, out
 
-    def make_skill(self, name: str, body: str = "hello", extra: dict | None = None):
-        d = self.skills / name
+    def make_skill(self, name: str, body: str = "hello", extra: dict | None = None,
+                   in_dir: Path | None = None):
+        d = (in_dir or self.skills) / name
         d.mkdir(parents=True, exist_ok=True)
         (d / "SKILL.md").write_text(
             f"---\nname: {name}\ndescription: test skill {name}\n---\n\n{body}\n", encoding="utf-8")
@@ -118,7 +139,10 @@ def main() -> int:
         check("remote layout has categories",
               (remote / "ClaudeSkills" / "work" / "alpha" / "SKILL.md").exists()
               and (remote / "ClaudeSkills" / "personal" / "beta" / "scripts" / "run.py").exists())
-        check("manifest written", (remote / "ClaudeSkills" / "manifest.json").exists())
+        manifest = json.loads(
+            (remote / "ClaudeSkills" / "manifest.json").read_text(encoding="utf-8"))
+        check("manifest lists both skills",
+              {"alpha", "beta"} <= set(manifest["skills"]), list(manifest["skills"]))
 
         code, out = a.run("push", expect=0)
         check("second push is a no-op", "Nothing to upload" in out, out)
@@ -191,13 +215,34 @@ def main() -> int:
               st["skills"]["alpha"]["state"])
 
         print("\ncredential guard")
-        fake_key = "sk-" + "abcdefghijklmnopqrstuvwxyz123"  # built at runtime: keeps this literal out of scanned source
+        # Built at runtime so this literal is not itself a scannable secret. It has to look
+        # like a real key: a sequential one (sk-abcdef...) is what documentation uses, and
+        # the scanner deliberately lets those through.
+        fake_key = "sk-" + "T3nQ7pXvR2mK9wZ4bF6hL8cJ5dY1gS0a"
         a.make_skill("leaky", "test", {"scripts/cfg.py": f'API_KEY = "{fake_key}"\n'})
         a.run("categorize", "leaky", "work", expect=0)
         code, out = a.run("push", "leaky", expect=1)
         check("push blocked by the credential scan", "Possible credentials" in out, out)
+        check("the report names the file and line", "cfg.py:1" in out, out)
         check("nothing uploaded for the leaky skill",
               not (remote / "ClaudeSkills" / "work" / "leaky").exists())
+
+        # A documented example must not trip the guard, or people learn to reach for
+        # --no-scan and lose the check entirely.
+        a.make_skill("docs-only", "test",
+                     {"README.md": 'Set API_KEY = "sk-your-api-key-goes-here-example" first.\n'})
+        a.run("categorize", "docs-only", "work", expect=0)
+        code, out = a.run("push", "docs-only", expect=0)
+        check("documentation placeholders do not block a push", "Uploaded 1" in out, out)
+
+        # And a real-looking key the author has judged safe can be marked in place.
+        (a.skills / "leaky" / "scripts" / "cfg.py").write_text(
+            f'API_KEY = "{fake_key}"  # skill-sync: allow-secret\n', encoding="utf-8")
+        code, out = a.run("push", "leaky", expect=0)
+        check("allow-secret pragma unblocks one line", "Uploaded 1" in out, out)
+
+        (a.skills / "leaky" / "scripts" / "cfg.py").write_text(
+            f'API_KEY = "{fake_key}"\n', encoding="utf-8")
         code, out = a.run("push", "leaky", "--no-scan", expect=0)
         check("--no-scan overrides the guard", "Uploaded 1" in out, out)
 
@@ -210,8 +255,11 @@ def main() -> int:
         code, out = a.run("prune", "--yes", "--only", "beta", expect=0)
         check("prune --yes deletes the orphan",
               not (remote / "ClaudeSkills" / "personal" / "beta").exists(), out)
-        manifest = json.loads((remote / "ClaudeSkills" / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads(
+            (remote / "ClaudeSkills" / "manifest.json").read_text(encoding="utf-8"))
         check("manifest no longer lists beta", "beta" not in manifest["skills"])
+        check("pruning one skill leaves the others' entries alone",
+              "alpha" in manifest["skills"], list(manifest["skills"]))
 
         print("\nhooks")
         time.sleep(1.1)
@@ -231,24 +279,146 @@ def main() -> int:
 
         print("\nmenu UI")
         menu = HERE / "menu.py"
+        rendered = {}
         for label, flags in (("unicode", ["--self-check", "--no-color"]),
                              ("ascii", ["--self-check", "--no-color", "--ascii"])):
             proc = subprocess.run([sys.executable, str(menu), *flags], env=a.env(),
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
             out = proc.stdout.decode("utf-8", "replace")
+            rendered[label] = out
             check(f"menu renders ({label})",
                   proc.returncode == 0 and "main menu" in out and "Upload skills" in out, out[-400:])
             check(f"menu draws checkboxes ({label})", "[x]" in out and "[ ]" in out)
-        check("ascii mode avoids box-drawing characters",
-              "╔" not in subprocess.run(
-                  [sys.executable, str(menu), "--self-check", "--ascii", "--no-color"],
-                  env=a.env(), stdout=subprocess.PIPE, timeout=120
-              ).stdout.decode("utf-8", "replace"))
+
+        # Asserting "no box-drawing characters" let every emoji through, which is how the
+        # menu ended up unreadable on consoles that cannot render them. Assert the actual
+        # invariant instead: --ascii output is 7-bit, nothing else.
+        stray = sorted({c for c in rendered["ascii"] if ord(c) > 127})
+        check("ascii mode emits only 7-bit characters", not stray, f"found: {stray}")
+
+        # Emoji stand in for text of the same printed width, so swapping them must not move
+        # a column. Compare the two renders line for line.
+        u_lines, a_lines = rendered["unicode"].splitlines(), rendered["ascii"].splitlines()
+        mismatch = next((i for i, (u, v) in enumerate(zip(u_lines, a_lines))
+                         if menu_visible_len(u.rstrip()) != menu_visible_len(v.rstrip())), None)
+        check("ascii and unicode renders keep the same column widths",
+              len(u_lines) == len(a_lines) and mismatch is None,
+              "" if mismatch is None else f"line {mismatch}:\n{u_lines[mismatch]}\n{a_lines[mismatch]}")
         proc = subprocess.run([sys.executable, str(menu)], env=a.env(), stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
         out = proc.stdout.decode("utf-8", "replace")
         check("menu refuses to run without a terminal",
               proc.returncode == 2 and "real terminal" in out, out)
+
+        print("\nskills outside the primary folder")
+        d = Machine(root, "machineD", extra_skill_dirs=1)
+        second = d.other_skills[0]
+        d.make_skill("roamer", "v1 from the second folder", in_dir=second)
+        d.run("setup", "--remote", str(remote), "--root", "ClaudeSkills",
+              "--categories", "work", "--machine", "D", expect=0)
+        d.run("categorize", "roamer", "work", expect=0)
+        code, out = d.run("push", "roamer", expect=0)
+        check("a skill outside the primary folder can be uploaded", "Uploaded 1" in out, out)
+
+        e = Machine(root, "machineE")
+        e.run("setup", "--remote", str(remote), "--root", "ClaudeSkills",
+              "--categories", "work", "--machine", "E", expect=0)
+        e.run("pull", "--skills", "roamer", expect=0)
+        time.sleep(1.1)
+        (e.skills / "roamer" / "SKILL.md").write_text(
+            "---\nname: roamer\ndescription: test skill roamer\n---\n\nv2 from E\n",
+            encoding="utf-8")
+        e.run("push", "roamer", expect=0)
+
+        code, out = d.run("pull", "--skills", "roamer", expect=0)
+        check("download updates the copy where it already lives",
+              "v2 from E" in (second / "roamer" / "SKILL.md").read_text(encoding="utf-8"), out)
+        check("download does not duplicate it into the primary folder",
+              not (d.skills / "roamer").exists())
+        st = d.status_json()
+        check("the updated skill reads as in-sync", st["skills"]["roamer"]["state"] == "in-sync",
+              st["skills"]["roamer"]["state"])
+
+        print("\na skill in more than one group")
+        # Adding a group must not take the skill out of the ones it already has, and must
+        # not move a single byte on the remote.
+        a.run("categorize", "alpha", "personal", "--add", expect=0)
+        st = a.status_json()
+        check("adding a group keeps the existing one",
+              sorted(st["skills"]["alpha"]["categories"]) == ["personal", "work"],
+              st["skills"]["alpha"].get("categories"))
+        check("the skill is still stored under its primary group only",
+              (remote / "ClaudeSkills" / "work" / "alpha" / "SKILL.md").exists()
+              and not (remote / "ClaudeSkills" / "personal" / "alpha").exists())
+
+        code, out = b.run("pull", expect=2)
+        listing = {line.split("(")[0].strip(): line for line in out.splitlines() if "):" in line}
+        check("it is listed under both groups",
+              "alpha" in listing.get("personal", "") and "alpha" in listing.get("work", ""),
+              out)
+
+        g = Machine(root, "machineG")
+        g.run("setup", "--remote", str(remote), "--root", "ClaudeSkills",
+              "--categories", "personal", "--machine", "G", expect=0)
+        g.run("pull", "personal", expect=0)
+        check("pulling the second group brings the skill down",
+              (g.skills / "alpha" / "SKILL.md").exists())
+
+        a.run("categorize", "alpha", "personal", "--remove", expect=0)
+        st = a.status_json()
+        check("removing one group leaves the other",
+              st["skills"]["alpha"]["categories"] == ["work"],
+              st["skills"]["alpha"].get("categories"))
+        code, out = a.run("categorize", "alpha", "work", "--remove", expect=1)
+        check("a skill cannot be left with no group at all", "no group at all" in out, out)
+
+        print("\nsplit manifest.d consolidation")
+        # A remote left in the per-skill layout by an older build must keep working and
+        # fold itself back into the single index, without losing an entry.
+        split_remote = root / "split-remote"
+        base = split_remote / "ClaudeSkills"
+        (base / "work" / "oldie").mkdir(parents=True, exist_ok=True)
+        (base / "work" / "oldie" / "SKILL.md").write_text(
+            "---\nname: oldie\ndescription: test skill oldie\n---\n\nfrom the split layout\n",
+            encoding="utf-8")
+        (base / "manifest.d").mkdir(parents=True, exist_ok=True)
+        (base / "manifest.d" / "oldie.json").write_text(json.dumps(
+            {"category": "work", "categories": ["work"], "hash": "deadbeef", "size": 10,
+             "files": 1, "machine": "old", "updated_at": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8")
+        f = Machine(root, "machineF")
+        f.run("setup", "--remote", str(split_remote), "--root", "ClaudeSkills",
+              "--categories", "work", "--machine", "F", expect=0)
+        st = f.status_json()
+        check("a split manifest is still readable", "oldie" in st["skills"], list(st["skills"]))
+        f.make_skill("fresh", "new skill")
+        f.run("categorize", "fresh", "work", expect=0)
+        f.run("push", "fresh", expect=0)
+        check("it consolidates into a single index",
+              (base / "manifest.json").exists() and not (base / "manifest.d").exists())
+        st = f.status_json()
+        check("nothing is lost in the consolidation",
+              {"oldie", "fresh"} <= set(st["skills"]), list(st["skills"]))
+        check("reads no longer touch the per-skill layout",
+              "oldie" in json.loads((base / "manifest.json").read_text(encoding="utf-8"))["skills"])
+
+        print("\nhook installation")
+        settings = root / "settings.json"
+        mine = {"hooks": {"Stop": [{"hooks": [{"type": "command",
+                                               "command": "echo skill-sync is great"}]}]}}
+        settings.write_text(json.dumps(mine), encoding="utf-8")
+        subprocess.run([sys.executable, str(HERE / "install_hooks.py"),
+                        "--settings", str(settings)], stdout=subprocess.PIPE, timeout=60)
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [h["command"] for g in data["hooks"]["Stop"] for h in g["hooks"]]
+        check("installing keeps an unrelated hook that merely says 'skill-sync'",
+              "echo skill-sync is great" in commands, commands)
+        subprocess.run([sys.executable, str(HERE / "install_hooks.py"), "--uninstall",
+                        "--settings", str(settings)], stdout=subprocess.PIPE, timeout=60)
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = [h["command"] for g in data.get("hooks", {}).get("Stop", []) for h in g["hooks"]]
+        check("uninstalling removes only our own hook",
+              commands == ["echo skill-sync is great"], commands)
 
     finally:
         failed = [r for r in results if r[0] == FAIL]

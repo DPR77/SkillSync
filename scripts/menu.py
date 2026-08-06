@@ -19,6 +19,7 @@ import argparse
 import os
 import shutil
 import sys
+import threading
 import time
 from argparse import Namespace
 from pathlib import Path
@@ -26,10 +27,28 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sync  # noqa: E402  (local module, path set above)
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+
+def _make_stdout_utf8() -> bool:
+    """Put this console into UTF-8 rather than giving up on the icons.
+
+    cmd.exe and PowerShell report a legacy code page (cp1252, cp850), which used to demote
+    the whole UI to ASCII. Both can print UTF-8 perfectly well once told to, so ask first
+    and only fall back if the console genuinely refuses.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    return "utf" in (sys.stdout.encoding or "").lower().replace("-", "")
+
+
+UTF8_OK = _make_stdout_utf8()
 
 
 # ------------------------------------------------------------------ terminal
@@ -231,7 +250,36 @@ def visible_len(s: str) -> int:
     return width
 
 
+# Emoji -> plain text for --ascii mode (and for consoles whose encoding cannot carry
+# them). Every replacement is deliberately the SAME visible width as the emoji it stands
+# in for - 2 cells for the emoji, 1 for the arrows and ticks - so the substitution can
+# happen at render time without shifting a single column. Widths are asserted by selftest.
+ASCII_FALLBACK = {
+    "🟢": "ok", "⚡": "^^", "☁️": "vv", "📦": "--", "📥": "<<", "🚨": "!!",
+    "🔵": "C:", "🟣": "G:", "🟠": "A:", "⚪": "L:",
+    "📊": "==", "📤": ">>", "🏷️": "##", "⚔️": "xx", "🔄": "@@", "🔧": "st",
+    "🩺": "dr", "🗑️": "rm", "❓": "??", "🚪": "qq",
+    "💾": "hd", "🪟": "od", "🗄️": "s3", "📡": "sf",
+    "✓": "v", "⚠": "!", "←": "<", "→": ">", "•": "*", "—": "-", "…": "~", "⬆": "^",
+}
+
+
+def deco(s: str) -> str:
+    """Swap emoji for plain markers when unicode is off.
+
+    Done here, at the one place every line passes through on its way to the terminal, so
+    no future screen can quietly reintroduce a hardcoded emoji and break --ascii.
+    """
+    if G.unicode:
+        return s
+    for emoji, plain in ASCII_FALLBACK.items():
+        if emoji in s:
+            s = s.replace(emoji, plain)
+    return s.replace("️", "")          # stray variation selectors: zero width anyway
+
+
 def clip(s: str, width: int) -> str:
+    s = deco(s)
     if visible_len(s) <= width:
         return s
     global ANSI_RE
@@ -257,6 +305,17 @@ def clip(s: str, width: int) -> str:
 
 def pad(s: str, width: int) -> str:
     return s + " " * max(0, width - visible_len(s))
+
+
+def cell(s: str, width: int) -> str:
+    """Exactly `width` cells: padded when short, truncated when long.
+
+    pad() alone only ever grows a string, so one long skill name pushed every column
+    after it out of line for the whole table.
+    """
+    if visible_len(s) <= width:
+        return pad(s, width)
+    return pad(clip(s, max(0, width - 1)) + ("…" if G.unicode else "~"), width)
 
 
 def plural(n: int, word: str) -> str:
@@ -338,6 +397,15 @@ def header(cfg, summary=None, width=None):
                      f"{', '.join(cfg.get('categories') or []) or C.dim('none yet')}")
     else:
         lines.append("  " + C.yellow("not configured yet - open  Setup  below"))
+        # Say which file was missing. A SKILL_SYNC_HOME inherited from another shell points
+        # this at an empty state dir, which is indistinguishable from a fresh install.
+        lines.append("  " + C.dim(f"looked in {sync.CONFIG_FILE}"))
+        if os.environ.get("SKILL_SYNC_HOME"):
+            lines.append("  " + C.yellow(
+                f"SKILL_SYNC_HOME is set to {os.environ['SKILL_SYNC_HOME']}"))
+    notice = update_notice()
+    if notice:
+        lines.append("  " + C.yellow(notice))
     if summary:
         lines.append("  " + summary)
     lines.append("")
@@ -518,39 +586,83 @@ def run_action(term, label, fn):
 def load_status(term, cfg, force=False, cache={}):
     if not force and cache.get("data") is not None and time.time() - cache.get("at", 0) < 300:
         return cache["data"]
-    term.draw(header(cfg) + ["  " + C.dim("reading remote manifest ...")])
+    # The last drawn line is where sync's progress bar redraws itself, so the scan reports
+    # its own movement here instead of leaving a frozen frame.
+    term.draw(header(cfg) + ["  " + C.dim("contacting the remote ...")])
     try:
+        term.cooked()
         data = sync.compute_status(cfg)
     except sync.SyncError as e:
+        term.raw()
         term.draw(header(cfg) + ["  " + C.red(f"error: {e}"), "",
                                  C.dim("  press any key")])
         term.read_key()
         data = {}
+    finally:
+        term.raw()
     cache["data"], cache["at"] = data, time.time()
     return data
 
 
+UPDATE_STATE = {"latest": None, "newer": False, "done": False, "reason": None}
+
+
+def start_update_check():
+    """Ask GitHub about a newer release without making the user wait for it.
+
+    Runs once, in a daemon thread, so a slow or blocked network costs the menu nothing:
+    the notice simply appears on a later frame, or never.
+    """
+    def work():
+        try:
+            latest, newer, reason = sync.update_available()
+            UPDATE_STATE.update(latest=latest, newer=newer, reason=reason)
+        except Exception:
+            pass                                   # a version check never breaks the menu
+        finally:
+            UPDATE_STATE["done"] = True
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def update_notice():
+    if not UPDATE_STATE["newer"]:
+        return None
+    return (f"⬆  skill-sync {UPDATE_STATE['latest']} is available "
+            f"(you have {sync.local_version()}) - open  Update")
+
+
+ORIGIN_WIDTH = 9
+
+
 def origin_badge(local_path: str | None) -> str:
+    """Which client's folder a skill lives in, always the same number of cells so the
+    columns after it stay put."""
     if not local_path:
-        return C.dim("          ")
+        return C.dim(" " * ORIGIN_WIDTH)
     p = str(local_path).lower()
     if ".claude" in p:
-        return C.blue("🔵 Claude")
-    elif ".gemini" in p:
-        return C.cyan("🟣 Gemini")
-    elif ".agents" in p:
-        return C.yellow("🟠 Agents")
-    return C.dim("⚪ Local ")
+        return C.blue(pad("🔵 Claude", ORIGIN_WIDTH))
+    if ".gemini" in p:
+        return C.cyan(pad("🟣 Gemini", ORIGIN_WIDTH))
+    if ".agents" in p:
+        return C.yellow(pad("🟠 Agents", ORIGIN_WIDTH))
+    return C.dim(pad("⚪ Local", ORIGIN_WIDTH))
+
+
+def group_label(info) -> str:
+    """Every group the skill belongs to, not just the one holding it on the remote."""
+    cats = info.get("categories") or ([info["category"]] if info.get("category") else [])
+    return ", ".join(cats) if cats else "no group"
 
 
 def skill_row(item, checked):
     i = item["info"]
-    name = C.bold(pad(item["key"], 22))
+    name = C.bold(cell(item["key"], 22))
     origin = origin_badge(i.get("local_path"))
-    cat_raw = i.get("category") or ""
-    cat = C.dim(pad(cat_raw or "no group", 14))
-    size = C.dim(pad(sync.human_size(i.get("size")), 7)) if i.get("size") else C.dim(pad("", 7))
-    badge = pad(state_badge(i["state"]), 20)
+    cat = C.dim(cell(group_label(i), 14))
+    size = C.dim(cell(sync.human_size(i["size"]) if i.get("size") else "", 7))
+    badge = cell(state_badge(i["state"]), 20)
     return f"{name} {origin} {cat} {badge} {size}"
 
 
@@ -558,12 +670,34 @@ def to_items(status, names):
     return [{"key": n, "info": status[n]} for n in names]
 
 
+def _groups(info) -> list:
+    return list(info.get("categories") or ([info["category"]] if info.get("category") else []))
+
+
+def in_group(info, group) -> bool:
+    cats = info.get("categories") or ([info["category"]] if info.get("category") else [])
+    return group in cats
+
+
+def by_category(status, names):
+    """Order that keeps every skill in a group together, group alphabetical then name.
+
+    A flat alphabetical list interleaves the groups, which is the one thing the list is
+    supposed to show at a glance. Skills in several groups sort by their first one.
+    """
+    def key(n):
+        info = status[n]
+        cats = info.get("categories") or ([info["category"]] if info.get("category") else [])
+        return (sorted(cats)[0] if cats else sync.NO_CATEGORY, n)
+    return sorted(names, key=key)
+
+
 def screen_push(term, cfg, status):
     actionable = [n for n, i in status.items() if i["state"] in (sync.ONLY_LOCAL, sync.LOCAL_NEW)]
     local = [n for n, i in status.items() if i["local"]]
     if not local:
         return
-    items = to_items(status, sorted(local))
+    items = to_items(status, by_category(status, local))
     checked = [k for k, it in enumerate(items) if it["key"] in actionable]
     picker = Picker(items, skill_row, "Upload skills",
                     checked=checked, hint="pre-selected: everything not yet on the remote")
@@ -571,7 +705,7 @@ def screen_push(term, cfg, status):
     if not chosen:
         return
     names = [c["key"] for c in chosen]
-    missing = [c["key"] for c in chosen if not c["info"].get("category")]
+    missing = [c["key"] for c in chosen if not _groups(c["info"])]
     assume = False
     if missing:
         # Show group picker inline instead of sending user back to Groups menu
@@ -596,12 +730,15 @@ def screen_push(term, cfg, status):
             assume = True
         else:
             def do_assign():
-                for n in missing:
-                    sync.cmd_categorize(Namespace(skill=n, category=target, force=False))
+                for k, n in enumerate(missing, 1):
+                    sync.progress_bar(k - 1, len(missing), f"{n} → {target}")
+                    sync.cmd_categorize(Namespace(skill=n, categories=[target],
+                                                  add=True, remove=False, force=False))
+                sync.progress_bar(len(missing), len(missing), "done")
             run_action(term, f"assign {len(missing)} skill(s) → {target}", do_assign)
     run_action(term, f"push {' '.join(names[:3])}{'...' if len(names) > 3 else ''}",
                lambda: sync.cmd_push(Namespace(skills=names, dry_run=False, force=False,
-                                               no_scan=True, assume_default=assume)))
+                                               no_scan=False, assume_default=assume)))
 
 
 
@@ -609,7 +746,8 @@ def screen_pull(term, cfg, status):
     remote_cats = {}
     for n, i in status.items():
         if i["remote"]:
-            remote_cats.setdefault(i.get("category") or sync.NO_CATEGORY, []).append(n)
+            for c in _groups(i) or [sync.NO_CATEGORY]:
+                remote_cats.setdefault(c, []).append(n)
     if not remote_cats:
         term.draw(header(cfg) + ["  " + C.dim("the remote has no skills yet"), "",
                                  C.dim("  press any key")])
@@ -647,7 +785,7 @@ def screen_group_detail(term, cfg, status, group_name):
     """Drill-down: show skills in a specific group and let the user reassign them."""
     while True:
         skills_in_group = sorted(n for n, i in status.items()
-                                 if i.get("category") == group_name and i.get("local"))
+                                 if in_group(i, group_name) and i.get("local"))
         all_local = sorted(n for n, i in status.items() if i.get("local"))
 
         lines = header(cfg)
@@ -680,9 +818,15 @@ def screen_group_detail(term, cfg, status, group_name):
             if new_name and new_name != group_name:
                 # Reassign all skills in this group to the new name
                 def do_rename():
-                    for n, i in status.items():
-                        if i.get("category") == group_name:
-                            sync.cmd_categorize(Namespace(skill=n, category=new_name, force=True))
+                    members = [n for n, i in status.items() if in_group(i, group_name)]
+                    for k, n in enumerate(members):
+                        sync.progress_bar(k, len(members), f"{n}: {group_name} → {new_name}")
+                        # Swap one label for the other, leaving the skill's other groups be.
+                        sync.cmd_categorize(Namespace(skill=n, categories=[new_name],
+                                                      add=True, remove=False, force=True))
+                        sync.cmd_categorize(Namespace(skill=n, categories=[group_name],
+                                                      add=False, remove=True, force=True))
+                    sync.progress_bar(len(members), len(members), "done")
                     # Update config categories list
                     cats_cfg = list(cfg.get("categories") or [])
                     if group_name in cats_cfg:
@@ -699,22 +843,49 @@ def screen_group_detail(term, cfg, status, group_name):
         if key != "a":
             continue
 
-        # Let the user pick which local skills to assign to this group
-        items = to_items(status, all_local)
-        pre_checked = [k for k, it in enumerate(items)
-                       if it["info"].get("category") == group_name]
-        picker = Picker(items, skill_row, f"Assign to '{group_name}'",
+        # Membership, not a move: ticking adds this group to whatever the skill already
+        # has, unticking takes only this group away.
+        items = to_items(status, by_category(status, all_local))
+        pre_checked = [k for k, it in enumerate(items) if in_group(it["info"], group_name)]
+        picker = Picker(items, skill_row, f"Which skills belong to '{group_name}'?",
                         checked=pre_checked,
-                        hint="tick skills → enter to confirm")
+                        hint=f"tick = also in {group_name} (keeps its other groups)   "
+                             f"untick = remove from {group_name} only")
         chosen = picker.run(term, cfg, summary_line(status))
-        if not chosen:
+        if chosen is None:
+            continue
+
+        wanted = {c["key"] for c in chosen}
+        was = {n for n in all_local if in_group(status[n], group_name)}
+        add, remove = sorted(wanted - was), sorted(was - wanted)
+        if not add and not remove:
+            term.draw(header(cfg) + ["  " + C.green(f"'{group_name}' is already exactly that"),
+                                     "", C.dim("  press any key")])
+            term.read_key()
+            continue
+
+        g = G.g
+        rows = [f"{C.green(n)} {C.dim('joins')} {group_name}   "
+                f"{C.dim('(now: ' + ', '.join(sorted(set(_groups(status[n]) + [group_name]))) + ')')}"
+                for n in add]
+        rows += [f"{C.yellow(n)} {C.dim('leaves')} {group_name}   "
+                 f"{C.dim('(now: ' + (', '.join(c for c in _groups(status[n]) if c != group_name) or 'no group') + ')')}"
+                 for n in remove]
+        if not confirm(term, cfg, f"Update membership of '{group_name}'", rows,
+                       note="Groups are labels, not folders: a skill can be in several at "
+                            "once and is only stored on the remote once."):
             continue
 
         def do():
-            for c in chosen:
-                sync.cmd_categorize(Namespace(skill=c["key"], category=group_name, force=True))
+            steps = [(n, "add") for n in add] + [(n, "remove") for n in remove]
+            for k, (n, how) in enumerate(steps):
+                sync.progress_bar(k, len(steps), f"{n} {how} {group_name}")
+                sync.cmd_categorize(Namespace(skill=n, categories=[group_name],
+                                              add=(how == "add"), remove=(how == "remove"),
+                                              force=True))
+            sync.progress_bar(len(steps), len(steps), "done")
 
-        run_action(term, f"assign → {group_name}", do)
+        run_action(term, f"{len(add)} joining, {len(remove)} leaving '{group_name}'", do)
         status = load_status(term, cfg, force=True)
 
 
@@ -722,12 +893,12 @@ def screen_groups(term, cfg, status):
     """Top-level Groups screen: shows a list of groups; clicking one drills in."""
     cats = list(cfg.get("categories") or [])
     ungrouped = sorted(n for n, i in status.items()
-                       if not i.get("category") and i.get("local"))
+                       if not _groups(i) and i.get("local"))
 
     while True:
-        # Build group list with counts
+        # A skill in several groups counts once in each: that is the point of the screen.
         group_counts = {c: sum(1 for i in status.values()
-                               if i.get("category") == c and i.get("local"))
+                               if in_group(i, c) and i.get("local"))
                         for c in cats}
 
         lines = header(cfg)
@@ -789,8 +960,11 @@ def screen_groups(term, cfg, status):
                             target = term.ask("  new group name: ")
                         if target:
                             def do():
-                                for n in ungrouped:
-                                    sync.cmd_categorize(Namespace(skill=n, category=target, force=False))
+                                for k, n in enumerate(ungrouped, 1):
+                                    sync.progress_bar(k - 1, len(ungrouped), f"{n} → {target}")
+                                    sync.cmd_categorize(
+                                        Namespace(skill=n, category=target, force=False))
+                                sync.progress_bar(len(ungrouped), len(ungrouped), "done")
                             run_action(term, f"assign → {target}", do)
                             status = load_status(term, cfg, force=True)
                 else:
@@ -851,7 +1025,7 @@ def screen_prune(term, cfg, status):
     chosen = picker.run(term, cfg, summary_line(status))
     if not chosen:
         return
-        names = [c["key"] for c in chosen]
+    names = [c["key"] for c in chosen]
     term.draw(header(cfg) + [
         "  " + C.red(C.bold("This permanently deletes from the remote:")), "",
     ] + [f"    {G.g['bullet']} {n}" for n in names] + [
@@ -1000,7 +1174,7 @@ def screen_setup(term, cfg):
             # Auto-push all local skills after initial setup
             run_action(term, "initial push — uploading all local skills",
                        lambda: sync.cmd_push(Namespace(skills=None, all=True,
-                                                       no_scan=True, dry_run=False,
+                                                       no_scan=False, dry_run=False,
                                                        force=False, assume_default=True)))
             continue
 
@@ -1102,6 +1276,7 @@ def screen_doctor(term, cfg):
 # Format: (key, icon, text_label, description)
 # Icon and text are separated so padding is applied only to pure ASCII text.
 MENU = [
+    ("update",    "⬆", "Update",         "Fetch the latest skill-sync from GitHub"),
     ("status",    "📊", "Status",        "Inspect local vs cloud skill differences"),
     ("push",      "📤", "Upload",         "Send changed skills to cloud remote"),
     ("pull",      "📥", "Download",       "Bring skill groups onto this computer"),
@@ -1144,7 +1319,7 @@ def screen_skill_detail(term, cfg, status, skill_name):
         origin = origin_badge(info.get("local_path"))
         lines = header(cfg) + [
             f"  {C.bold(skill_name)}  {origin}  {badge}",
-            f"  {C.dim('category:')}  {info.get('category') or C.dim('none')}   "
+            f"  {C.dim('groups:')}  {group_label(info)}   "
             f"{C.dim('size:')}  {sync.human_size(info.get('size'))}",
             "",
             C.dim("─" * min(term_size()[0], 100)),
@@ -1172,7 +1347,7 @@ def screen_skill_detail(term, cfg, status, skill_name):
         if key == "u" and state in (sync.LOCAL_NEW, sync.ONLY_LOCAL):
             run_action(term, f"push {skill_name}",
                        lambda: sync.cmd_push(Namespace(skills=[skill_name], all=False,
-                                                       no_scan=True, dry_run=False,
+                                                       no_scan=False, dry_run=False,
                                                        force=False, assume_default=False)))
             status.update(load_status(term, cfg, force=True))
         elif key == "d" and state in (sync.REMOTE_NEW, sync.ONLY_REMOTE):
@@ -1189,26 +1364,40 @@ def screen_skill_detail(term, cfg, status, skill_name):
                        lambda: sync.cmd_resolve(Namespace(skill=skill_name, keep="remote")))
             status.update(load_status(term, cfg, force=True))
         elif key == "g":
-            cats = list(cfg.get("categories") or [])
+            # Multi-select: the ticked set becomes the skill's groups outright, so this
+            # one screen both adds and removes.
+            cats = list(dict.fromkeys(list(cfg.get("categories") or []) + _groups(info)))
             cat_items = [{"key": c} for c in cats] + [{"key": "+ new group ..."}]
+            here = _groups(info)
             cat_picker = Picker(cat_items, lambda it, ch: it["key"],
-                                "Which group?", single=True)
+                                f"Groups for {skill_name}",
+                                checked=[k for k, it in enumerate(cat_items)
+                                         if it["key"] in here],
+                                hint="a skill can be in several groups at once")
             picked = cat_picker.run(term, cfg)
-            if picked:
-                category = picked[0]["key"]
-                if category.startswith("+"):
-                    category = term.ask("  new group name: ")
-                if category:
-                    run_action(term, f"categorize {skill_name} → {category}",
-                               lambda cat=category: sync.cmd_categorize(
-                                   Namespace(skill=skill_name, category=cat, force=False)))
+            if picked is not None:
+                wanted = [p["key"] for p in picked if not p["key"].startswith("+")]
+                if any(p["key"].startswith("+") for p in picked):
+                    extra = term.ask("  new group name: ")
+                    if extra:
+                        wanted.append(extra)
+                if not wanted:
+                    term.draw(header(cfg) + [
+                        "  " + C.yellow("a skill has to stay in at least one group"), "",
+                        C.dim("  press any key")])
+                    term.read_key()
+                else:
+                    run_action(term, f"{skill_name} → {', '.join(wanted)}",
+                               lambda w=wanted: sync.cmd_categorize(
+                                   Namespace(skill=skill_name, categories=w,
+                                             add=False, remove=False, force=False)))
                     status.update(load_status(term, cfg, force=True))
 
 
 def status_screen(term, cfg, status):
     """Status list: select a skill to open its action panel."""
     while True:
-        items = to_items(status, sorted(status))
+        items = to_items(status, by_category(status, status))
         picker = Picker(items, skill_row, "Status", single=True,
                         hint="enter → open actions   esc → back")
         chosen = picker.run(term, cfg, summary_line(status))
@@ -1217,6 +1406,48 @@ def status_screen(term, cfg, status):
         skill_name = chosen[0]["key"]
         screen_skill_detail(term, cfg, status, skill_name)
         status = load_status(term, cfg, force=True)
+
+
+def screen_update(term, cfg):
+    """Show installed vs published, then update on confirmation."""
+    term.draw(header(cfg) + ["  " + C.dim("asking GitHub for the published version ...")])
+    try:
+        latest, newer, reason = sync.update_available(force=True, timeout=8)
+    except Exception as e:
+        latest, newer, reason = None, False, f"{e.__class__.__name__}: {e}"
+    log_line = C.yellow(reason) if (latest is None and reason) else None
+    UPDATE_STATE.update(latest=latest, newer=newer, reason=reason, done=True)
+
+    installed = sync.local_version()
+    lines = header(cfg) + [
+        "  " + C.bold("Update skill-sync"), "",
+        f"    installed   {C.bold(installed)}",
+        f"    published   {C.bold(latest or C.dim('unknown'))}",
+        f"    source      {C.dim(sync.REPO_URL)}",
+        "",
+    ]
+    if log_line:
+        lines += ["  " + log_line, "", C.dim("  press any key")]
+        term.draw(lines)
+        term.read_key()
+        return
+    if not newer:
+        lines += ["  " + C.green("You are on the latest version."), "",
+                  C.dim("  press any key")]
+        term.draw(lines)
+        term.read_key()
+        return
+
+    if not confirm(term, cfg, f"Update skill-sync {installed} -> {latest}",
+                   [f"downloads {sync.ARCHIVE_URL}",
+                    "overwrites this skill's files",
+                    "keeps a full backup of the current version first"],
+                   note="Your remote, config and synced skills are untouched. Restart the "
+                        "menu afterwards so the new code is loaded."):
+        return
+    run_action(term, f"update to {latest}",
+               lambda: sync.cmd_update(Namespace(check=False, force=False)))
+    UPDATE_STATE.update(newer=False)
 
 
 def main_loop(term):
@@ -1245,6 +1476,9 @@ def main_loop(term):
         choice = MENU[cursor][0]
         if choice == "quit":
             return 0
+        if choice == "update":
+            screen_update(term, cfg)
+            continue
         if choice == "setup":
             cfg = screen_setup(term, cfg)
             status = load_status(term, cfg, force=True) if cfg else {}
@@ -1271,7 +1505,7 @@ def main_loop(term):
         status = load_status(term, cfg, force=True)
 
 
-def screen_help(term, cfg):
+def help_lines(cfg):
     g = G.g
     width = min(term_size()[0], 100)
     hr = C.dim(g["h"] * width)
@@ -1319,11 +1553,25 @@ def screen_help(term, cfg):
         "",
         C.dim("  press any key to go back"),
     ]
-    term.draw(lines)
+    return lines
+
+
+def screen_help(term, cfg):
+    term.draw(help_lines(cfg))
     term.read_key()
 
 
 # ---------------------------------------------------------------- self check
+
+def emit(lines):
+    """Print frame lines through the same clip() the real screen uses.
+
+    self-check used to print raw frames, so it could not see anything clip() does -
+    including the emoji substitution that makes --ascii actually ASCII.
+    """
+    width = term_size()[0]
+    print("\n".join(clip(line, width) for line in lines))
+
 
 def self_check():
     """Render every frame once with fake data - no terminal input needed."""
@@ -1344,13 +1592,13 @@ def self_check():
                              remote_updated="2026-07-30T08:00:00+00:00"),
     }
     print("\n=== main menu ===")
-    print("\n".join(menu_frame(cfg, status, 1)))
+    emit(menu_frame(cfg, status, 1))
     print("\n=== skill picker (upload) ===")
-    items = to_items(status, sorted(n for n, i in status.items() if i["local"]))
+    items = to_items(status, by_category(status, [n for n, i in status.items() if i["local"]]))
     p = Picker(items, skill_row, "Upload skills", checked=[1],
                hint="pre-selected: everything not yet on the remote")
     p.cursor = 1
-    print("\n".join(p.frame(cfg, summary_line(status))))
+    emit(p.frame(cfg, summary_line(status)))
     print("\n=== group picker (download) ===")
     cats = [{"key": "work", "names": ["web-builder"]},
             {"key": "personal", "names": ["last30days", "recipe-notes"]}]
@@ -1358,9 +1606,11 @@ def self_check():
                                      f"{pad(str(len(it['names'])) + ' skills', 12)} "
                                      f"{C.green('1 new here')}",
                 "Download groups", checked=[0])
-    print("\n".join(cp.frame(cfg, summary_line(status))))
+    emit(cp.frame(cfg, summary_line(status)))
+    print("\n=== help / legend ===")
+    emit(help_lines(cfg))
     print("\n=== not configured ===")
-    print("\n".join(header(None)))
+    emit(header(None))
     return 0
 
 
@@ -1375,8 +1625,9 @@ def main():
 
     if args.no_color or os.environ.get("NO_COLOR"):
         C.enabled = False
-    enc = (sys.stdout.encoding or "").lower()
-    if args.ascii or ("utf" not in enc and "65001" not in enc):
+    # Only drop the icons when asked to, or when the console really cannot carry UTF-8
+    # after being asked nicely at import time.
+    if args.ascii or not UTF8_OK:
         G.unicode = False
 
     if args.self_check:
@@ -1396,6 +1647,7 @@ def main():
         return 2
 
     sync.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    start_update_check()
     with Term() as term:
         return main_loop(term)
 
