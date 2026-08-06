@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SkillSync — Sincroniza tus AI Skills en todas tus máquinas</title>
+  <meta name="description" content="Sincroniza tus habilidades de IA entre ordenadores y clientes (Claude Code, Gemini, Antigravity, Cursor, Codex). Desarrollado por GTI Santander.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0c10;
+      --bg-card: #12161f;
+      --bg-card-hover: #1a202c;
+      --border-color: rgba(255, 255, 255, 0.08);
+      --border-accent: rgba(59, 130, 246, 0.3);
+      --primary: #3b82f6;
+      --primary-glow: rgba(59, 130, 246, 0.25);
+      --accent-teal: #14b8a6;
+      --accent-purple: #8b5cf6;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --text-dim: #6b7280;
+      --code-bg: #0d1117;
+      --radius: 14px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      line-height: 1.6;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Ambient background glow */
+    .bg-glow {
+      position: fixed;
+      top: -20%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 900px;
+      height: 600px;
+      background: radial-gradient(circle, rgba(59, 130, 246, 0.12) 0%, rgba(139, 92, 246, 0.08) 40%, rgba(0,0,0,0) 70%);
+      z-index: -1;
+      pointer-events: none;
+    }
+
+    .container {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Header Nav */
+    header {
+      padding: 20px 0;
+      border-bottom: 1px solid var(--border-color);
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(10, 12, 16, 0.8);
+    }
+
+    .nav-wrapper {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logo-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--text-main);
+    }
+
+    .logo-badge {
+      background: linear-gradient(135deg, var(--primary), var(--accent-purple));
+      font-family: 'Outfit', sans-serif;
+      font-weight: 800;
+      font-size: 1.1rem;
+      padding: 6px 14px;
+      border-radius: 8px;
+      color: #fff;
+      box-shadow: 0 0 20px var(--primary-glow);
+    }
+
+    .brand-name {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 24px;
+      align-items: center;
+    }
+
+    .nav-link {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+
+    .nav-link:hover {
+      color: var(--text-main);
+    }
+
+    .btn-github {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+
+    .btn-github:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-accent);
+      transform: translateY(-1px);
+    }
+
+    /* Hero Section */
+    .hero {
+      padding: 80px 0 60px;
+      text-align: center;
+    }
+
+    .tag-author {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(20, 184, 166, 0.1);
+      border: 1px solid rgba(20, 184, 166, 0.3);
+      color: var(--accent-teal);
+      padding: 6px 16px;
+      border-radius: 30px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 24px;
+    }
+
+    .tag-author a {
+      color: inherit;
+      text-decoration: underline;
+    }
+
+    .hero-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 3.5rem;
+      font-weight: 800;
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      margin-bottom: 20px;
+      background: linear-gradient(180deg, #ffffff 0%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero-subtitle {
+      font-size: 1.2rem;
+      color: var(--text-muted);
+      max-width: 680px;
+      margin: 0 auto 36px;
+      font-weight: 400;
+    }
+
+    /* Command Pill Bar */
+    .cmd-bar {
+      background: var(--code-bg);
+      border: 1px solid var(--border-accent);
+      border-radius: 12px;
+      padding: 14px 20px;
+      max-width: 580px;
+      margin: 0 auto 40px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5), 0 0 20px var(--primary-glow);
+    }
+
+    .cmd-text {
+      font-family: 'Fira Code', monospace;
+      font-size: 0.95rem;
+      color: var(--accent-teal);
+    }
+
+    .cmd-text span {
+      color: var(--text-dim);
+    }
+
+    .btn-copy {
+      background: rgba(255,255,255,0.08);
+      border: none;
+      color: var(--text-main);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-copy:hover {
+      background: rgba(255,255,255,0.16);
+    }
+
+    /* Feature Grid */
+    .section-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 2rem;
+      font-weight: 700;
+      text-align: center;
+      margin-bottom: 12px;
+    }
+
+    .section-desc {
+      text-align: center;
+      color: var(--text-muted);
+      margin-bottom: 48px;
+      font-size: 1rem;
+    }
+
+    .grid-features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 24px;
+      margin-bottom: 80px;
+    }
+
+    .card-feature {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 28px;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .card-feature:hover {
+      border-color: var(--border-accent);
+      transform: translateY(-4px);
+      box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+    }
+
+    .feature-icon {
+      font-size: 2rem;
+      margin-bottom: 16px;
+      display: inline-block;
+    }
+
+    .feature-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .feature-body {
+      color: var(--text-muted);
+      font-size: 0.925rem;
+      line-height: 1.55;
+    }
+
+    /* Clients Matrix */
+    .clients-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 40px;
+      margin-bottom: 80px;
+      text-align: center;
+    }
+
+    .clients-grid {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    .client-pill {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border-color);
+      padding: 10px 20px;
+      border-radius: 30px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Terminal Preview Box */
+    .terminal-box {
+      background: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      overflow: hidden;
+      max-width: 800px;
+      margin: 0 auto 80px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+    }
+
+    .terminal-header {
+      background: rgba(255,255,255,0.03);
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .dot-red { background: #ef4444; }
+    .dot-yellow { background: #f59e0b; }
+    .dot-green { background: #10b981; }
+
+    .terminal-title {
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      margin-left: 8px;
+      font-family: 'Fira Code', monospace;
+    }
+
+    .terminal-body {
+      padding: 24px;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.875rem;
+      color: #e2e8f0;
+      line-height: 1.7;
+    }
+
+    .term-prompt { color: var(--accent-teal); }
+    .term-cmd { color: #f87171; }
+    .term-success { color: #34d399; }
+    .term-dim { color: var(--text-dim); }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border-color);
+      padding: 40px 0;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+
+    footer a {
+      color: var(--text-muted);
+      text-decoration: underline;
+    }
+
+    @media (max-width: 768px) {
+      .hero-title { font-size: 2.4rem; }
+      .grid-features { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="bg-glow"></div>
+
+  <!-- Header -->
+  <header>
+    <div class="container nav-wrapper">
+      <a href="#" class="logo-group">
+        <span class="logo-badge">⚡ SkillSync</span>
+        <span class="brand-name">SkillSync</span>
+      </a>
+      <nav class="nav-links">
+        <a href="#features" class="nav-link">Características</a>
+        <a href="#clients" class="nav-link">Clientes AI</a>
+        <a href="#commands" class="nav-link">Comandos</a>
+        <a href="https://github.com/DPR77/SkillSync" target="_blank" class="btn-github">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          GitHub
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="container">
+      <div class="tag-author">
+        🚀 Desarrollado por <a href="https://gtisantander.com" target="_blank">GTI Santander</a>
+      </div>
+      <h1 class="hero-title">Tus AI Skills en cada máquina<br>donde trabajas</h1>
+      <p class="hero-subtitle">
+        Instala una habilidad de IA una vez y encuéntrala sincronizada al instante en tu portátil, tu PC de escritorio y en cualquier cliente de IA (Claude Code, Gemini, Antigravity, Cursor, Codex).
+      </p>
+
+      <div class="cmd-bar">
+        <div class="cmd-text"><span>$</span> npx skills add DPR77/SkillSync</div>
+        <button class="btn-copy" onclick="navigator.clipboard.writeText('npx skills add DPR77/SkillSync'); alert('¡Comando copiado al portapapeles!');">Copiar</button>
+      </div>
+    </div>
+  </section>
+
+  <main class="container">
+
+    <!-- Interactive Terminal Preview -->
+    <div class="terminal-box">
+      <div class="terminal-header">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+        <span class="terminal-title">bash — skill-sync status</span>
+      </div>
+      <div class="terminal-body">
+        <p><span class="term-prompt">$</span> python scripts/sync.py status</p>
+        <br>
+        <p class="term-dim">Remote: gdrive:ClaudeSkills    machine: dev-laptop-win</p>
+        <br>
+        <p><strong style="color: #60a5fa;">work (3)</strong></p>
+        <p>------------------</p>
+        <p>  web-builder      <span class="term-success">in-sync</span></p>
+        <p>  seo-audit        <span style="color: #f59e0b;">local-newer</span></p>
+        <p>  grill-me         <span style="color: #a78bfa;">remote-only</span></p>
+        <br>
+        <p><span class="term-prompt">$</span> python scripts/sync.py push --threads 4</p>
+        <p class="term-success">✓ Uploaded 1 skill to remote (seo-audit)</p>
+      </div>
+    </div>
+
+    <!-- Features -->
+    <section id="features">
+      <h2 class="section-title">¿Por qué SkillSync?</h2>
+      <p class="section-desc">Diseñado para desarrolladores que buscan máxima velocidad, seguridad y cero fricción.</p>
+
+      <div class="grid-features">
+        <div class="card-feature">
+          <div class="feature-icon">🔗</div>
+          <h3 class="feature-title">Junctions & Symlinks sin Admin</h3>
+          <p class="feature-body">Con el flag <code>place --symlink</code>, vincula tus habilidades entre Claude Code, Gemini y Cursor al instante usando Directory Junctions en Windows (sin permisos de admin) y symlinks en macOS/Linux.</p>
+        </div>
+
+        <div class="card-feature">
+          <div class="feature-icon">⚡</div>
+          <h3 class="feature-title">Sync Paralelo Multi-Hilo</h3>
+          <p class="feature-body">Transfiere y sincroniza decenas de habilidades simultáneamente usando hilos concurrentes <code>--threads</code>. Reduce los tiempos de subida y descarga de 30s a menos de 3s.</p>
+        </div>
+
+        <div class="card-feature">
+          <div class="feature-icon">🛡️</div>
+          <h3 class="feature-title">Escáner de Credenciales Nativo</h3>
+          <p class="feature-body">Protege tu código evitando subir por accidente claves de API de OpenAI, Anthropic, tokens de AWS o contraseñas. Soporta exenciones por línea con `# skill-sync: allow-secret`.</p>
+        </div>
+
+        <div class="card-feature">
+          <div class="feature-icon">📁</div>
+          <h3 class="feature-title">Multinube mediante Rclone</h3>
+          <p class="feature-body">Compatible con cualquier proveedor de almacenamiento que soporte Rclone: Google Drive, Dropbox, OneDrive, S3, WebDAV, Nextcloud o una carpeta compartida en red local.</p>
+        </div>
+
+        <div class="card-feature">
+          <div class="feature-icon">🔄</div>
+          <h3 class="feature-title">Hooks Automáticos de Sesión</h3>
+          <p class="feature-body">Sincronización silenciosa en segundo plano al cerrar tu sesión de trabajo (Stop hook) y avisos automáticos al iniciar la jornada si hay actualizaciones en la nube.</p>
+        </div>
+
+        <div class="card-feature">
+          <div class="feature-icon">🖥️</div>
+          <h3 class="feature-title">Interfaz TUI Interactiva</h3>
+          <p class="feature-body">Incluye un menú visual interactivo en terminal (<code>python scripts/menu.py</code>) con casillas de selección, filtros en vivo y soporte ASCII/Unicode.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Clients Matrix -->
+    <section id="clients" class="clients-section">
+      <h2 class="section-title">Compatible con todos tus Clientes de IA</h2>
+      <p class="section-desc">Detecta y distribuye tus skills automáticamente entre las plataformas instaladas.</p>
+      
+      <div class="clients-grid">
+        <div class="client-pill">💬 Claude Code</div>
+        <div class="client-pill">🤖 Google Gemini / Antigravity IDE</div>
+        <div class="client-pill">⚡ Cursor IDE</div>
+        <div class="client-pill">🧠 OpenAI Codex</div>
+        <div class="client-pill">🦅 OpenClaw / Hermes</div>
+        <div class="client-pill">🌐 Global User Agents</div>
+      </div>
+    </section>
+
+    <!-- Commands Cheat Sheet -->
+    <section id="commands" style="margin-bottom: 80px;">
+      <h2 class="section-title">Comandos Frecuentes</h2>
+      <p class="section-desc">Control total desde la CLI de Python sin dependencias complejas.</p>
+
+      <div class="grid-features">
+        <div class="card-feature">
+          <h4 style="font-family: monospace; color: var(--accent-teal); margin-bottom: 8px;">python scripts/sync.py setup</h4>
+          <p class="feature-body">Configura el almacenamiento remoto y las categorías por primera vez.</p>
+        </div>
+        <div class="card-feature">
+          <h4 style="font-family: monospace; color: var(--accent-teal); margin-bottom: 8px;">python scripts/sync.py push --threads 4</h4>
+          <p class="feature-body">Sube habilidades modificadas a la nube en paralelo.</p>
+        </div>
+        <div class="card-feature">
+          <h4 style="font-family: monospace; color: var(--accent-teal); margin-bottom: 8px;">python scripts/sync.py pull</h4>
+          <p class="feature-body">Descarga las habilidades disponibles desde la nube.</p>
+        </div>
+        <div class="card-feature">
+          <h4 style="font-family: monospace; color: var(--accent-teal); margin-bottom: 8px;">python scripts/sync.py place &lt;skill&gt; gemini --symlink</h4>
+          <p class="feature-body">Crea un enlace simbólico instantáneo hacia otros clientes de IA.</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <p>Desarrollado con ❤️ por <a href="https://gtisantander.com" target="_blank">GTI Santander</a> · Código fuente en <a href="https://github.com/DPR77/SkillSync" target="_blank">GitHub</a></p>
+      <p style="margin-top: 8px; font-size: 0.8rem;">Licencia MIT · 2026 SkillSync</p>
+    </div>
+  </footer>
+
+</body>
+</html>
