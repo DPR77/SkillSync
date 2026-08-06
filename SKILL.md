@@ -188,15 +188,33 @@ Restart Claude Code afterwards so new skills are discovered.
 `install_hooks.py` registers two hooks in `~/.claude/settings.json`:
 
 - **Stop** → `hook-stop`: at the end of a session, compares a cheap mtime/file-count
-  signature per skill and uploads only what changed. Silent when nothing did. It works to
-  a 90s budget, smallest skill first, so closing a session is never held up; whatever does
-  not fit goes up next time. Raise it with `"hook_budget_seconds": 240` in
-  `~/.claude/skill-sync/config.json`.
+  signature per skill. A skill that has synced before and changed gets pushed, to a 90s
+  budget, smallest skill first, so closing a session is never held up; whatever does not
+  fit goes up next time. Raise the budget with `"hook_budget_seconds": 240` in
+  `~/.claude/skill-sync/config.json`. A skill that has **never** synced anywhere does not
+  get pushed silently — see "New skills ask first" below.
 - **SessionStart** → `hook-session-start`: at most once every 6 hours, prints one line if
   the remote has skills this machine lacks or newer versions from another machine.
 
 Both no-op until `setup` has run and never fail a session. `python scripts/install_hooks.py
 --uninstall` removes them.
+
+### New skills ask first
+
+A skill with no entry in `state.json` has never synced anywhere. Silently uploading it the
+first time is exactly what this is meant to avoid, so instead:
+
+- `install_watch.py` starts `watch_new_skills.py` at login (Startup-folder launcher on
+  Windows, a LaunchAgent on macOS, a systemd `--user` unit or XDG autostart entry on
+  Linux — no admin/root anywhere). It polls every few seconds, waits for a new skill's
+  files to stop changing, then runs the same check `hook-stop` does.
+- Either that watcher or the next `hook-stop` finds the brand-new skill and opens a
+  separate console window running `sync.py confirm-new`: one y/n prompt per new skill,
+  with its description shown. Yes pushes it; no (or ignoring the window) means it will not
+  ask again for that skill unless it changes further.
+- Run it by hand anytime: `python scripts/sync.py confirm-new`.
+- `python scripts/install_watch.py --uninstall` removes the watcher; the `Stop`-hook check
+  still covers new skills on the next Claude Code session either way.
 
 ## Safety model
 

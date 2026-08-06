@@ -30,6 +30,7 @@ except Exception:
 HERE = Path(__file__).resolve().parent
 SYNC_SCRIPT = HERE / "sync.py"
 HOOKS_SCRIPT = HERE / "install_hooks.py"
+WATCH_INSTALLER = HERE / "install_watch.py"
 HOME = Path.home()
 
 
@@ -127,6 +128,16 @@ def install_hooks():
         log(f"Failed to install hooks: {e}")
 
 
+def install_watcher():
+    log("Installing background watcher (asks about a new skill within seconds, "
+        "not on the next Claude Code turn)...")
+    try:
+        subprocess.run([sys.executable, str(WATCH_INSTALLER)], check=True)
+    except Exception as e:
+        log(f"Watcher install note (non-fatal, hooks still cover it on the next "
+            f"Claude Code session): {e}")
+
+
 def main():
     print("""
 ╭──────────────────────────────────────────────────────────────────╮
@@ -140,6 +151,7 @@ def main():
     remote = setup_zero_friction_remote()
     auto_configure_skill_sync(remote)
     install_hooks()
+    install_watcher()
 
     log("\n🎉 ZERO-FRICTION SETUP COMPLETE!")
     log("skill-sync is 100% configured and ready to use.")

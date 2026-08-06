@@ -78,7 +78,9 @@ Requires Python 3.8+. The installer fetches [rclone](https://rclone.org) through
 platform's package manager if it is missing (`winget`, `brew`, or the official script),
 picks up your first existing rclone remote — or falls back to a local folder at
 `~/CloudSkills` so you can start with no cloud account at all — creates the `work`,
-`school`, `personal` categories, and registers the session hooks.
+`school`, `personal` categories, registers the session hooks, and installs a small
+background watcher (see below) so a brand-new skill gets noticed within seconds
+instead of on the next Claude Code turn.
 
 <details>
 <summary><b>Set it up yourself instead</b></summary>
@@ -90,6 +92,7 @@ by hand:
 rclone config                                     # create a remote, interactively
 python scripts/sync.py setup --remote gdrive: --categories work,school,personal
 python scripts/install_hooks.py                   # optional, enables automatic sync
+python scripts/install_watch.py                   # optional, near-instant new-skill detection
 python scripts/sync.py doctor                     # confirm everything is wired up
 ```
 
@@ -214,14 +217,20 @@ or replacing its code mid-pull, is not worth the trouble. It updates from GitHub
 4. **Record.** `manifest.json` is re-read and merged before every write, so a machine that
    synced in the meantime keeps its entry. An interrupted upload records whatever already
    landed and resumes next time.
-5. **Repeat, automatically — but ask about brand-new skills.** The Stop hook auto-uploads
-   edits to skills that have synced before, within a 90-second budget, smallest first, so
-   closing a session is never held up. A skill that has never been synced anywhere is
-   different: the hook does not push it silently. It blocks the Stop event once (exit code
-   2) with a message naming the new skill(s), so Claude relays the question to you instead
-   of deciding on its own. Say yes and it runs `sync.py push <name>`; say no (or ignore it)
-   and it simply won't ask again for that skill unless it changes further — push it manually
-   anytime with `/skill-sync push <name>`.
+5. **Repeat, automatically — but ask about brand-new skills.** Edits to a skill that has
+   synced before auto-upload, within a 90-second budget, smallest first, so nothing is ever
+   held up waiting on a slow link. A skill that has never been synced anywhere is different:
+   nothing pushes it silently. Instead, a background watcher (`watch_new_skills.py`, started
+   at login by `install_watch.py` — Startup-folder launcher on Windows, a LaunchAgent on
+   macOS, a systemd `--user` unit or XDG autostart entry on Linux, no admin/root needed
+   anywhere) polls every few seconds, waits for the new skill's files to stop changing
+   (installers write several at once), and opens a separate console window
+   (`sync.py confirm-new`) listing it with a real y/n prompt. Say yes and it pushes that
+   skill; say no, or ignore the window, and it simply won't ask again for that skill unless
+   it changes further — push it manually anytime with `sync.py confirm-new` or
+   `sync.py push <name>`. The same brand-new-vs-already-tracked split is checked by the
+   Claude Code `Stop` hook too, so it's covered even on a machine where the watcher isn't
+   running yet.
 
 ---
 

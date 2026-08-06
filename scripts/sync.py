@@ -1909,6 +1909,24 @@ def changed_since_state():
     return changed
 
 
+def console_python() -> str:
+    """A console-attached interpreter, even when this process itself runs under pythonw.exe.
+
+    The scheduled/hidden check runs under pythonw.exe on purpose (no flash on every poll).
+    But pythonw.exe has no console: reusing sys.executable for the interactive confirm-new
+    window opens a cmd window that can't show or read anything - it just sits there empty.
+    """
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        candidate = exe.with_name("python.exe")
+        if candidate.exists():
+            return str(candidate)
+        found = shutil.which("python") or shutil.which("python3")
+        if found:
+            return found
+    return str(exe)
+
+
 def spawn_confirm_window():
     """Pop a real, separate console window running `confirm-new` (best-effort).
 
@@ -1917,18 +1935,19 @@ def spawn_confirm_window():
     works either way and doesn't depend on Claude relaying anything.
     """
     script = str(Path(__file__).resolve())
+    py = console_python()
     try:
         if os.name == "nt":
             subprocess.Popen(
                 ["cmd", "/c", "start", "skill-sync: new skills", "cmd", "/k",
-                 sys.executable, script, "confirm-new"],
+                 py, script, "confirm-new"],
                 close_fds=True,
             )
         else:
             for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
                 path = shutil.which(term)
                 if path:
-                    subprocess.Popen([path, "-e", sys.executable, script, "confirm-new"],
+                    subprocess.Popen([path, "-e", py, script, "confirm-new"],
                                       close_fds=True)
                     break
         return True
