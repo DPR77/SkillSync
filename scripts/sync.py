@@ -1001,7 +1001,8 @@ def fetch_latest_version(timeout=4):
     import urllib.error
     import urllib.request
     try:
-        req = urllib.request.Request(VERSION_URL, headers={"User-Agent": "skill-sync"})
+        url = f"{VERSION_URL}?_={int(time.time())}"
+        req = urllib.request.Request(url, headers={"User-Agent": "skill-sync", "Cache-Control": "no-cache"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", "replace").strip()
         return (text, None) if text else (None, "the published VERSION file is empty")
