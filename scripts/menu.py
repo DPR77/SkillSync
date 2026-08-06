@@ -547,6 +547,33 @@ class Picker:
                 return None
 
 
+def confirm(term, cfg, title: str, items: list, note: str | None = None) -> bool:
+    """Show a confirmation screen with title, items to change, note, and y/n prompt."""
+    lines = header(cfg) + [
+        "  " + C.bold(title), "",
+    ]
+    for item in items:
+        lines.append("    • " + str(item))
+    lines.append("")
+    if note:
+        lines += ["  " + C.dim(note), ""]
+    lines += [
+        "  " + C.yellow("Proceed? [y/n]"),
+        "",
+        footer([("y", "confirm"), ("n / esc", "cancel")])
+    ]
+    term.draw(lines)
+    while True:
+        try:
+            key = term.read_key().lower()
+        except KeyboardInterrupt:
+            return False
+        if key in ("y", "enter"):
+            return True
+        if key in ("n", "esc", "q"):
+            return False
+
+
 # ------------------------------------------------------------------ actions
 
 def run_action(term, label, fn):
