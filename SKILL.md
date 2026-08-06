@@ -80,11 +80,11 @@ non-interactive subcommands below — use those yourself.
 |---|---|
 | `setup --remote <remote:> --categories work,school,personal` | one-time configuration on each computer |
 | `status` (`--json`) | what is local-only, remote-only, newer, or conflicting across the PC |
-| `push [skill...]` (`--json`) | upload changed skills (`--dry-run`, `--force`, `--no-scan`, `--budget <seconds>`) |
-| `pull [category...]` | download; bare `pull` lists what the remote has (`--skills`, `--dest`, `--force`) |
+| `push [skill...]` (`--json`) | upload changed skills (`--dry-run`, `--force`, `--no-scan`, `--budget <seconds>`, `--threads <N>`) |
+| `pull [category...]` | download; bare `pull` lists what the remote has (`--skills`, `--dest`, `--force`, `--threads <N>`) |
 | `categorize <skill> <category...>` | set a skill's groups; `--add` / `--remove` change membership without touching the rest |
 | `update` (`--check`, `--force`) | update skill-sync itself from GitHub, backing up the current version |
-| `place <skill> <client...>` (`--dest`, `--force`) | copy a local skill into another AI client's skills folder (`claude`, `gemini`, `agents`/`cursor`/`antigravity`/`opencode`) — purely local, no remote involved |
+| `place <skill> <client...>` (`--dest`, `--force`, `--symlink`) | copy or symlink a local skill into another AI client's skills folder (`claude`, `gemini`, `agents`/`cursor`/`antigravity`/`opencode`) |
 | `merge <skill>` (`--json`) | inspect Markdown diff and merge conflicts between local and remote |
 | `resolve <skill> --keep local\|remote` | settle a conflict, backing up the losing side |
 | `prune [--yes] [--only ...]` | the only command that deletes on the remote |

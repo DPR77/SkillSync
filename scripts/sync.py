@@ -19,6 +19,7 @@ Exit codes: 0 ok / 1 error or blocked / 2 needs user input.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import difflib
 import fnmatch
 import hashlib
@@ -1276,29 +1277,40 @@ def cmd_push(args):
             deadline = time.monotonic() + args.budget_seconds
         json_out = getattr(args, "json", False)
         total = len(to_push)
-        try:
-            for n, (name, category, i, cats) in enumerate(to_push, 1):
-                # Always attempt the first one, so a budget smaller than a single upload
-                # defers forever instead of making progress.
-                if deadline and done and time.monotonic() > deadline:
-                    deferred = [x[0] for x in to_push[n - 1:]]
-                    break
-                sp = Path(i["local_path"]) if i.get("local_path") else (SKILLS_DIR / name)
-                detail = f"{name} -> {category}/ ({i['files']} files, {human_size(i['size'])})"
-                if not json_out:
-                    if i["size"] > BIG_SKILL_BYTES:
-                        print(f"note: {name} is {human_size(i['size'])} - upload may be slow")
-                    if _interactive():
-                        progress_bar(n - 1, total, detail)
-                    else:
-                        print(f"push [{n}/{total}] {detail}")
-                push_skill(cfg, name, category, dry_run=args.dry_run, skill_dir=sp)
-                if not json_out and _interactive():
-                    progress_bar(n, total, f"{name} done")
-                if not args.dry_run:
+        threads = getattr(args, "threads", 1) or 1
+        lock_entries = threading.Lock()
+
+        def _do_push_item(idx, item):
+            name, category, i, cats = item
+            sp = Path(i["local_path"]) if i.get("local_path") else (SKILLS_DIR / name)
+            detail = f"{name} -> {category}/ ({i['files']} files, {human_size(i['size'])})"
+            if not json_out:
+                if i["size"] > BIG_SKILL_BYTES:
+                    print(f"note: {name} is {human_size(i['size'])} - upload may be slow")
+                if _interactive():
+                    progress_bar(idx - 1, total, detail)
+                else:
+                    print(f"push [{idx}/{total}] {detail}")
+            push_skill(cfg, name, category, dry_run=args.dry_run, skill_dir=sp)
+            if not json_out and _interactive():
+                progress_bar(idx, total, f"{name} done")
+            if not args.dry_run:
+                with lock_entries:
                     entries[name] = manifest_entry(cfg, category, i["local_hash"],
                                                    i["size"], i["files"], categories=cats)
                     done.append((name, category, i))
+
+        try:
+            if threads > 1 and len(to_push) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
+                    futures = [executor.submit(_do_push_item, idx, item) for idx, item in enumerate(to_push, 1)]
+                    concurrent.futures.wait(futures)
+            else:
+                for n, (name, category, i, cats) in enumerate(to_push, 1):
+                    if deadline and done and time.monotonic() > deadline:
+                        deferred = [x[0] for x in to_push[n - 1:]]
+                        break
+                    _do_push_item(n, (name, category, i, cats))
         finally:
             # An upload can be interrupted, or killed by the Stop hook's timeout, after
             # files already landed on the remote. Record what did land, or the manifest
@@ -1391,6 +1403,9 @@ def cmd_pull(args):
 
         pulled, conflicts, skipped_in_sync = [], [], []
         total_wanted = len(wanted)
+        threads = getattr(args, "threads", 1) or 1
+        pull_tasks = []
+
         for n, name in enumerate(sorted(wanted), 1):
             i = st.get(name, {})
             category = primary_category(remote_skills[name], NO_CATEGORY)
@@ -1407,14 +1422,28 @@ def cmd_pull(args):
                     print(f"skipped {name}: your local copy is newer (push it, or pull --force)")
                     continue
             dest_root.mkdir(parents=True, exist_ok=True)
+            pull_tasks.append((n, name, category, dest_root))
+
+        def _do_pull_item(idx, name, category, dest_root):
             if _interactive():
-                progress_bar(n - 1, total_wanted, f"{category}/{name} -> {dest_root}")
+                progress_bar(idx - 1, total_wanted, f"{category}/{name} -> {dest_root}")
             else:
-                print(f"pull [{n}/{total_wanted}] {category}/{name} -> {dest_root}")
+                print(f"pull [{idx}/{total_wanted}] {category}/{name} -> {dest_root}")
             pull_skill(cfg, name, category, dest_root, dry_run=args.dry_run)
             if _interactive():
-                progress_bar(n, total_wanted, f"{name} done")
-            pulled.append((name, category, dest_root))
+                progress_bar(idx, total_wanted, f"{name} done")
+            return (name, category, dest_root)
+
+        if threads > 1 and len(pull_tasks) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = [executor.submit(_do_pull_item, idx, name, cat, dest) for idx, name, cat, dest in pull_tasks]
+                for fut in concurrent.futures.as_completed(futures):
+                    res = fut.result()
+                    pulled.append(res)
+        else:
+            for idx, name, cat, dest in pull_tasks:
+                res = _do_pull_item(idx, name, cat, dest)
+                pulled.append(res)
 
         for name in conflicts:
             print(f"CONFLICT: {name}  -> python sync.py resolve {name} --keep local|remote")
@@ -1553,22 +1582,46 @@ def cmd_place(args):
                         "antigravity, opencode) or --dest <folder>")
 
     placed = []
+    use_symlink = getattr(args, "symlink", False)
     for label, dest_root in targets:
         dst = dest_root / name
+        is_link = dst.is_symlink() or (os.name == "nt" and os.path.islink(dst))
         if dst.resolve() == src.resolve():
             print(f"skip {label}: {name} is already there")
             continue
         dest_root.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
+        if dst.exists() or is_link:
             if not args.force:
                 print(f"skip {label}: {name} already exists there (use --force to overwrite)")
                 continue
             backup = TRASH_DIR / stamp() / label / name
             backup.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(dst), str(backup))
-        shutil.copytree(src, dst)
-        placed.append((label, dst))
-        print(f"placed {name} -> {label} ({dst})")
+            if is_link or dst.is_file():
+                try:
+                    dst.unlink()
+                except OSError:
+                    if os.name == "nt" and dst.is_dir():
+                        os.rmdir(dst)
+            elif dst.is_dir():
+                shutil.move(str(dst), str(backup))
+
+        if use_symlink:
+            if os.name == "nt":
+                res = subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                if res.returncode != 0:
+                    try:
+                        os.symlink(src, dst, target_is_directory=True)
+                    except Exception as err:
+                        raise SyncError(f"failed to create junction/symlink on Windows: {err}")
+            else:
+                os.symlink(src, dst, target_is_directory=True)
+            placed.append((label, dst))
+            print(f"placed (symlink) {name} -> {label} ({dst})")
+        else:
+            shutil.copytree(src, dst)
+            placed.append((label, dst))
+            print(f"placed {name} -> {label} ({dst})")
 
     if placed:
         print("Restart the target client(s) so they discover the skill.")
@@ -1906,6 +1959,7 @@ def build_parser():
     s.add_argument("--budget", type=float, dest="budget_seconds",
                    help="stop starting new uploads after this many seconds; the rest go "
                         "on the next run")
+    s.add_argument("--threads", type=int, default=1, help="number of parallel transfer threads (default: 1)")
     s.set_defaults(func=cmd_push, deadline=None)
 
     s = sub.add_parser("pull", help="download skills by category")
@@ -1914,6 +1968,7 @@ def build_parser():
     s.add_argument("--dest", help="alternative destination folder (for testing)")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--force", action="store_true", help="overwrite the local copy")
+    s.add_argument("--threads", type=int, default=1, help="number of parallel transfer threads (default: 1)")
     s.set_defaults(func=cmd_pull)
 
     s = sub.add_parser("categorize", help="set, add or remove a skill's groups")
@@ -1931,6 +1986,7 @@ def build_parser():
                    help="claude, gemini, agents (cursor/antigravity/opencode share this dir)")
     s.add_argument("--dest", help="custom destination folder instead of/besides a client name")
     s.add_argument("--force", action="store_true", help="overwrite an existing copy at the destination")
+    s.add_argument("--symlink", action="store_true", help="create a directory junction / symlink instead of copying files")
     s.set_defaults(func=cmd_place)
 
     s = sub.add_parser("resolve", help="resolve a conflict, keeping one side")
