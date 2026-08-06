@@ -10,7 +10,7 @@ WebDAV/Nextcloud, SFTP, or a plain local folder (handy for a NAS or a USB drive)
 |---|---|
 | Windows | `winget install Rclone.Rclone` (or `choco install rclone`) |
 | macOS | `brew install rclone` |
-| Linux | `sudo -v ; curl https://rclone.org/install.sh \| sudo bash` |
+| Linux | `sudo apt install rclone` (or `sudo dnf install rclone`) |
 
 ## 2. Create a remote — the user must do this
 

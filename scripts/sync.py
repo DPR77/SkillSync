@@ -431,7 +431,7 @@ def rclone_bin(required=True):
             "rclone was not found on PATH. Install it, then run `rclone config`:\n"
             "  Windows: winget install Rclone.Rclone\n"
             "  macOS:   brew install rclone\n"
-            "  Linux:   sudo -v ; curl https://rclone.org/install.sh | sudo bash")
+            "  Linux:   sudo apt install rclone | sudo dnf install rclone")
     return exe
 
 
@@ -1925,6 +1925,66 @@ def cmd_hook_session_start(args):
         parts.append(f"{len(updated)} updated ({', '.join(sorted(updated)[:4])})")
     if parts:
         print(f"[skill-sync] remote has {' and '.join(parts)}. Run /skill-sync pull")
+    return 0
+
+
+def cmd_update(args):
+    """Update skill-sync from GitHub with strict ZIP path traversal protection & input sanitization."""
+    current_ver = local_version()
+    print(f"Current skill-sync version: {current_ver}")
+    if getattr(args, "check", False):
+        print(f"Skill-sync repository: {REPO_URL}")
+        return 0
+
+    import urllib.request
+    import zipfile
+    import io
+
+    print(f"Fetching latest update from {ARCHIVE_URL}...")
+    req = urllib.request.Request(ARCHIVE_URL, headers={"User-Agent": "skill-sync-update/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status != 200:
+                raise SyncError(f"HTTP error {resp.status} fetching update")
+            content_bytes = resp.read()
+    except Exception as err:
+        raise SyncError(f"Failed to download update: {err}")
+
+    # Maximum allowed package size guard (25MB)
+    if len(content_bytes) > 25 * 1024 * 1024:
+        raise SyncError("Update package exceeds maximum allowed size limit (25 MB)")
+
+    target_dir = Path(__file__).resolve().parent.parent
+    try:
+        with zipfile.ZipFile(io.BytesIO(content_bytes)) as z:
+            names = z.namelist()
+            # Path Traversal Guard (prevent zip-slip / arbitrary code execution vulnerabilities)
+            for name in names:
+                parts = Path(name).parts
+                if ".." in parts or any(p.startswith("/") or p.startswith("\\") for p in parts):
+                    raise SyncError(f"Security error: invalid path traversal detected in archive entry '{name}'")
+            
+            with tempfile.TemporaryDirectory(prefix="skill-sync-update-") as tmp_extract:
+                z.extractall(tmp_extract)
+                extracted_items = list(Path(tmp_extract).iterdir())
+                if not extracted_items:
+                    raise SyncError("Update archive is empty")
+                root_sub = extracted_items[0]
+                if not (root_sub / "SKILL.md").exists():
+                    raise SyncError("Update archive missing mandatory SKILL.md")
+                
+                for item in root_sub.iterdir():
+                    dst = target_dir / item.name
+                    if item.is_dir():
+                        if dst.exists():
+                            shutil.rmtree(dst)
+                        shutil.copytree(item, dst)
+                    else:
+                        shutil.copy2(item, dst)
+    except zipfile.BadZipFile:
+        raise SyncError("Downloaded update is not a valid ZIP archive")
+
+    print(f"Successfully updated skill-sync at {target_dir}")
     return 0
 
 

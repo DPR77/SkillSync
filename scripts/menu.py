@@ -1065,7 +1065,7 @@ def screen_setup(term, cfg):
             "  " + C.red("rclone is not installed."), "",
             "    Windows  " + C.cyan("winget install Rclone.Rclone"),
             "    macOS    " + C.cyan("brew install rclone"),
-            "    Linux    " + C.cyan("curl https://rclone.org/install.sh | sudo bash"),
+            "    Linux    " + C.cyan("sudo apt install rclone"),
             "", "  " + C.dim("install it, then reopen this menu"), "",
             C.dim("  press any key")])
         term.read_key()

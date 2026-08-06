@@ -57,7 +57,16 @@ def ensure_rclone():
         elif system == "darwin":
             subprocess.run(["brew", "install", "rclone"], check=True)
         elif system == "linux":
-            subprocess.run("curl https://rclone.org/install.sh | sudo bash", shell=True, check=True)
+            log("Installing rclone via system package manager...")
+            if shutil.which("apt-get"):
+                subprocess.run(["sudo", "apt-get", "update", "-y"], check=False)
+                subprocess.run(["sudo", "apt-get", "install", "-y", "rclone"], check=True)
+            elif shutil.which("dnf"):
+                subprocess.run(["sudo", "dnf", "install", "-y", "rclone"], check=True)
+            elif shutil.which("pacman"):
+                subprocess.run(["sudo", "pacman", "-S", "--noconfirm", "rclone"], check=True)
+            else:
+                log("Please install rclone using your distribution package manager (e.g. sudo apt install rclone).")
         else:
             log(f"Unsupported OS for auto-install: {system}. Install rclone manually.")
             return False
