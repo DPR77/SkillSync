@@ -45,16 +45,20 @@ def python_exe() -> str:
         for candidate in ("python3", "python"):
             found = shutil.which(candidate)
             if found:
-                return found
-    return str(exe)
+                return Path(found).as_posix()
+    return exe.as_posix()
 
 
 def quote(s: str) -> str:
-    return f'"{s}"' if " " in s else s
+    s_str = str(s)
+    s_posix = Path(s_str).as_posix() if ("/" in s_str or "\\" in s_str) else s_str
+    return f'"{s_posix}"' if " " in s_posix else s_posix
 
 
 def hook_command(subcommand: str) -> str:
-    return f"{quote(python_exe())} {quote(str(SYNC_SCRIPT))} {subcommand} --quiet"
+    exe = quote(python_exe())
+    script = quote(SYNC_SCRIPT.as_posix())
+    return f"{exe} {script} {subcommand} --quiet"
 
 
 def is_ours(entry: dict) -> bool:
@@ -70,8 +74,8 @@ def is_ours(entry: dict) -> bool:
         return True
     for hook in entry.get("hooks", []):
         command = str((hook or {}).get("command", ""))
-        if LEGACY_MARKER in command and ("hook-stop" in command
-                                         or "hook-session-start" in command):
+        if ("sync.py" in command or LEGACY_MARKER in command) and ("hook-stop" in command
+                                                                   or "hook-session-start" in command):
             return True
     return False
 
