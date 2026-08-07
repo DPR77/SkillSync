@@ -667,14 +667,23 @@ def origin_badge(local_path: str | None) -> str:
     columns after it stay put."""
     if not local_path:
         return C.dim(" " * ORIGIN_WIDTH)
-    p = str(local_path).lower()
-    if ".claude" in p:
-        return C.blue(pad("🔵 Claude", ORIGIN_WIDTH))
-    if ".gemini" in p:
-        return C.cyan(pad("🟣 Gemini", ORIGIN_WIDTH))
-    if ".agents" in p:
-        return C.yellow(pad("🟠 Agents", ORIGIN_WIDTH))
-    return C.dim(pad("⚪ Local", ORIGIN_WIDTH))
+    p = str(local_path).replace("\\", "/").lower()
+    u = G.unicode
+    if "/.claude/plugins/marketplaces/" in p:
+        return C.magenta(pad("💬 Plugin" if u else "[Plugin]", ORIGIN_WIDTH))
+    if "/.claude/skills/" in p:
+        return C.blue(pad("💬 Claude" if u else "[Claude]", ORIGIN_WIDTH))
+    if "/.gemini/" in p:
+        return C.cyan(pad("🤖 Gemini" if u else "[Gemini]", ORIGIN_WIDTH))
+    if "/.cursor/" in p:
+        return C.green(pad("⚡ Cursor" if u else "[Cursor]", ORIGIN_WIDTH))
+    if "/.openclaw/" in p:
+        return C.yellow(pad("🦅 Claw" if u else "[Claw]", ORIGIN_WIDTH))
+    if "/.codex/" in p:
+        return C.blue(pad("🧠 Codex" if u else "[Codex]", ORIGIN_WIDTH))
+    if "/.agents/" in p:
+        return C.yellow(pad("🌐 Agents" if u else "[Agents]", ORIGIN_WIDTH))
+    return C.dim(pad("👤 Custom" if u else "[Custom]", ORIGIN_WIDTH))
 
 
 def group_label(info) -> str:
