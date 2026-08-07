@@ -4,15 +4,15 @@
 
 **your skills, on every machine you work from**
 
-Desarrollado por **[GTI Santander](https://gtisantander.com)**
+Built by **[GTI Santander](https://gtisantander.com)**
 
 Install a skill once. Find it on the laptop, the desktop, and in whichever AI client you
 open next — Claude Code, Gemini, Antigravity, Cursor, OpenCode.
 
+[![CI](https://github.com/DPR77/SkillSync/actions/workflows/ci.yml/badge.svg)](https://github.com/DPR77/SkillSync/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776ab)](https://www.python.org/)
 [![Storage](https://img.shields.io/badge/storage-rclone-4a90d9)](https://rclone.org)
-[![Tests](https://img.shields.io/badge/tests-153%20checks-brightgreen)](scripts/selftest.py)
 
 [Install](#install) · [Storage](#pick-your-storage) · [Commands](#what-you-get) ·
 [Menu](#interactive-menu) · [How it works](#how-it-works) · [Safety](#safety)
@@ -81,6 +81,29 @@ picks up your first existing rclone remote — or falls back to a local folder a
 `school`, `personal` categories, registers the session hooks, and installs a small
 background watcher (see below) so a brand-new skill gets noticed within seconds
 instead of on the next Claude Code turn.
+
+<details>
+<summary><b>Install it as a command instead of a folder of scripts</b></summary>
+
+The scripts run straight from the skill folder and always will — that is how Claude Code
+and the other clients load it. If you would rather have `skill-sync` on your `PATH`:
+
+```bash
+pip install git+https://github.com/DPR77/SkillSync   # or: pip install . from a clone
+```
+
+That gives you `skill-sync`, `skill-sync-menu`, `skill-sync-install`, `skill-sync-hooks`
+and `skill-sync-watch`, each doing exactly what the matching script does:
+
+```bash
+skill-sync doctor
+skill-sync push
+skill-sync-menu
+```
+
+Not on PyPI — install from the repository.
+
+</details>
 
 <details>
 <summary><b>Set it up yourself instead</b></summary>
@@ -259,8 +282,14 @@ or replacing its code mid-pull, is not worth the trouble. It updates from GitHub
 ```bash
 python scripts/selftest.py        # 61 checks: one end-to-end story
 python scripts/crud_test.py       # 92 checks: independent CRUD and edge cases
+python scripts/edge_test.py       # pathological inputs
 python scripts/menu.py --self-check
 ```
+
+All four run on every push and pull request — Linux, macOS and Windows, Python 3.8 to
+3.13 — in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). The badge at the top of
+this page is that workflow, not a hand-written number. They need `rclone` on `PATH` and
+skip themselves cleanly without it.
 
 `selftest.py` simulates several machines sharing one remote and walks the whole life cycle
 in order: setup, group, push, selective pull, edit and re-push, conflict detection and
@@ -293,6 +322,6 @@ data is stored. Known failure modes and how to recover a file from `.trash` are 
 **[Providers](references/providers.md)** · **[Troubleshooting](references/troubleshooting.md)** ·
 **[Skill definition](SKILL.md)**
 
-Created by GTI Santander — MIT licensed.
+Built by [GTI Santander](https://gtisantander.com) — MIT licensed.
 
 </div>

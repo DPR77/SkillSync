@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill-sync"
+dynamic = ["version"]
+description = "Sync AI agent skills between computers and between AI clients through any rclone remote."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "GTI Santander" }]
+keywords = ["claude", "claude-code", "agent-skills", "skills", "rclone", "sync", "gemini", "cursor"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/DPR77/SkillSync"
+Source = "https://github.com/DPR77/SkillSync"
+Issues = "https://github.com/DPR77/SkillSync/issues"
+
+[project.scripts]
+skill-sync = "skill_sync.sync:main"
+skill-sync-menu = "skill_sync.menu:main"
+skill-sync-install = "skill_sync.install:main"
+skill-sync-hooks = "skill_sync.install_hooks:main"
+skill-sync-watch = "skill_sync.install_watch:main"
+
+[tool.setuptools]
+packages = ["skill_sync"]
+
+[tool.setuptools.package-dir]
+skill_sync = "scripts"
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }

@@ -1009,6 +1009,11 @@ def local_version() -> str:
     try:
         return VERSION_FILE.read_text(encoding="utf-8").strip() or "0"
     except OSError:
+        pass
+    try:  # pip-installed: no VERSION file next to the package, read the metadata
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("skill-sync")
+    except Exception:
         return "0"
 
 
@@ -2204,7 +2209,7 @@ def cmd_update(args):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        prog="sync.py",
+        prog=Path(sys.argv[0]).name.replace(".exe", "") or "sync.py",
         description="Sync Claude Code skills across machines with rclone.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
