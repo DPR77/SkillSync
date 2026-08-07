@@ -62,6 +62,13 @@ Nothing is overwritten without a backup.
 
 ## Install
 
+```bash
+npx skills add DPR77/SkillSync --skill skill-sync
+```
+
+That puts the skill in your client. Then run the installer once to wire up syncing —
+it picks the storage, creates the categories and registers the hooks.
+
 **macOS / Linux**
 
 ```bash
