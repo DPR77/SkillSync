@@ -1046,8 +1046,8 @@ def pack_args(action, **kw):
     them the same way the CLI does."""
     base = dict(pack_action=action, name=None, project=None, here=False, client=None,
                 link=False, copy=False, force=False, no_pull=False, dry_run=False,
-                skills=[], extends=[], from_project=None, group=None,
-                from_client=None, to_client=None, keep_local=False)
+                skills=[], extends=[], from_project=None, from_usage=False, top=8,
+                group=None, from_client=None, to_client=None, keep_local=False)
     base.update(kw)
     return Namespace(**base)
 
@@ -1413,16 +1413,57 @@ def screen_setup(term, cfg):
          None),   # cloned locally, then committed and pushed for you
     ]
 
-    if not exe:
-        term.draw(header(cfg) + [
-            "  " + C.red("rclone is not installed."), "",
-            "    Windows  " + C.cyan("winget install Rclone.Rclone"),
-            "    macOS    " + C.cyan("brew install rclone"),
-            "    Linux    " + C.cyan("sudo apt install rclone"),
-            "", "  " + C.dim("install it, then reopen this menu"), "",
-            C.dim("  press any key")])
-        term.read_key()
-        return cfg
+    # rclone is required by every provider, including the git one (the clone is synced with
+    # it). Telling the user to go away and install it was a dead end: every other screen
+    # sends them here, and here refused to do anything. So offer to install it.
+    while not exe:
+        # Unprivileged installers can be run for the user. Anything needing root is only
+        # ever printed: a menu should not be raising its own privileges, and a spawned
+        # sudo has nowhere to prompt for a password anyway.
+        if os.name == "nt":
+            shown = "winget install Rclone.Rclone"
+            argv = ["winget", "install", "Rclone.Rclone", "--accept-source-agreements",
+                    "--accept-package-agreements"]
+        elif sys.platform == "darwin":
+            shown, argv = "brew install rclone", ["brew", "install", "rclone"]
+        elif shutil.which("apt-get"):
+            shown, argv = "sudo apt-get install -y rclone", None
+        elif shutil.which("dnf"):
+            shown, argv = "sudo dnf install -y rclone", None
+        else:
+            shown, argv = "install rclone with your package manager", None
+        lines = header(cfg) + [
+            "  " + C.red("rclone was not found."), "",
+            "  " + C.dim("skill-sync moves the files with rclone, so every provider needs"),
+            "  " + C.dim("it - including the git one, whose clone is synced with rclone."), "",
+        ]
+        if argv:
+            lines += [f"  {C.bold('i')} {C.dim('install it now')}   "
+                      f"{C.dim('runs')} {C.cyan(shown)}"]
+        else:
+            lines += ["  " + C.dim("run this yourself, it needs root:"),
+                      "      " + C.cyan(shown), ""]
+        lines += [
+            f"  {C.bold('r')} {C.dim('re-check')}   "
+            f"{C.dim('already installed? this looks again, PATH and all')}",
+            f"  {C.bold('esc')} {C.dim('back')}",
+            "",
+            "  " + C.dim("A terminal opened before rclone was installed keeps the old PATH;"),
+            "  " + C.dim("skill-sync also looks in the winget, Scoop and Homebrew folders."),
+        ]
+        term.draw(lines)
+        key = term.read_key()
+        if key in ("esc", "q"):
+            return cfg
+        if key == "i" and argv:
+            run_action(term, shown, lambda a=argv: _sp.run(a, check=False))
+        elif key != "r":
+            continue
+        exe = sync.rclone_bin(required=False)
+        if exe:
+            term.draw(header(cfg) + ["  " + C.green(f"rclone found: {exe}"), "",
+                                     C.dim("  press any key to continue with Setup")])
+            term.read_key()
 
     def refresh_configured():
         _c, out, _e = sync.rclone(["listremotes"], check=False, timeout=60)
@@ -1868,6 +1909,16 @@ def screen_update(term, cfg):
 def main_loop(term):
     cursor = 0
     cfg = sync.load_config()
+    if not cfg:
+        # Nothing is configured, and every other screen would just say "run Setup first".
+        # Open it directly instead of making the user find it.
+        term.draw(header(cfg) + [
+            "  " + C.bold("Nothing is configured on this computer yet."), "",
+            "  " + C.dim("Setup opens now: pick where the skills are stored (a cloud"),
+            "  " + C.dim("remote, a folder, or a git repository) and it does the rest."), "",
+            C.dim("  press any key")])
+        term.read_key()
+        cfg = screen_setup(term, cfg)
     status = load_status(term, cfg) if cfg else {}
     while True:
         term.draw(menu_frame(cfg, status, cursor))

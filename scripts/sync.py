@@ -424,14 +424,56 @@ class Lock:
 
 # -------------------------------------------------------------------- rclone
 
-def rclone_bin(required=True):
+def rclone_candidates():
+    """Where rclone ends up when it is installed but not on this shell's PATH.
+
+    winget, Homebrew and Scoop all extend PATH for *future* shells, so a terminal that was
+    already open when rclone was installed reports it missing - and the menu then sent
+    people off to install something they already had.
+    """
+    exe = "rclone.exe" if os.name == "nt" else "rclone"
+    paths = []
+    if os.name == "nt":
+        local = Path(os.environ.get("LOCALAPPDATA") or (HOME / "AppData" / "Local"))
+        paths.append(local / "Microsoft" / "WinGet" / "Links" / exe)
+        packages = local / "Microsoft" / "WinGet" / "Packages"
+        if packages.is_dir():
+            for pkg in sorted(packages.glob("Rclone.Rclone_*")):
+                paths.extend(sorted(pkg.glob(f"**/{exe}")))
+        paths += [Path(r"C:\ProgramData\chocolatey\bin") / exe,
+                  HOME / "scoop" / "shims" / exe,
+                  Path(os.environ.get("ProgramFiles") or r"C:\Program Files") / "rclone" / exe]
+    else:
+        paths += [Path("/opt/homebrew/bin") / exe, Path("/usr/local/bin") / exe,
+                  Path("/usr/bin") / exe, Path("/snap/bin") / exe,
+                  HOME / ".local" / "bin" / exe, HOME / "bin" / exe]
+    return paths
+
+
+def rclone_bin(required=True, _cache={}):
     exe = shutil.which("rclone")
+    if not exe:
+        exe = _cache.get("exe")
+        if exe and not Path(exe).exists():
+            exe = None
+        if not exe:
+            for candidate in rclone_candidates():
+                try:
+                    if candidate.is_file():
+                        exe = str(candidate)
+                        _cache["exe"] = exe
+                        log(f"rclone found off PATH at {exe}")
+                        break
+                except OSError:
+                    continue
     if not exe and required:
         raise SyncError(
-            "rclone was not found on PATH. Install it, then run `rclone config`:\n"
+            "rclone was not found. Install it, then run `rclone config`:\n"
             "  Windows: winget install Rclone.Rclone\n"
             "  macOS:   brew install rclone\n"
-            "  Linux:   sudo apt install rclone | sudo dnf install rclone")
+            "  Linux:   sudo apt install rclone | sudo dnf install rclone\n"
+            "  Already installed? Open a new terminal so PATH picks it up, or run the\n"
+            "  skill-sync menu, which can install it for you.")
     return exe
 
 
@@ -1240,65 +1282,6 @@ def update_available(force=False, timeout=4):
     if not latest:
         return None, False, reason
     return latest, _version_key(latest) > _version_key(local_version()), reason
-
-
-def cmd_update(args):
-    """Replace this skill with the published version, keeping a backup."""
-    import urllib.request
-    import zipfile
-
-    here = VERSION_FILE.parent
-    latest, newer, reason = update_available(force=True, timeout=10)
-    if latest is None:
-        raise SyncError(f"cannot check for updates: {reason or 'unknown error'}")
-    print(f"installed: {local_version()}    published: {latest}")
-    if not newer and not args.force:
-        print("Already up to date.")
-        return 0
-    if args.check:
-        print(f"An update is available. Install it with: python sync.py update")
-        return 0
-
-    tmp = Path(tempfile.mkdtemp(prefix="skill-sync-update-"))
-    try:
-        archive = tmp / "main.zip"
-        with Spinner(f"downloading {latest}"):
-            req = urllib.request.Request(ARCHIVE_URL, headers={"User-Agent": "skill-sync"})
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                archive.write_bytes(resp.read())
-            with zipfile.ZipFile(archive) as zf:
-                zf.extractall(tmp)
-
-        roots = [p for p in tmp.iterdir() if p.is_dir()]
-        if len(roots) != 1:
-            raise SyncError(f"unexpected archive layout from {ARCHIVE_URL}")
-        source = roots[0]
-        if not (source / "SKILL.md").exists():
-            raise SyncError("the downloaded archive does not look like skill-sync")
-
-        # Keep the whole current copy before writing over it: this is the one operation
-        # that can break the tool doing the operating.
-        backup = TRASH_DIR / f"{stamp()}-{SELF_NAME}-{local_version()}"
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(here, backup, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("__pycache__", ".git"))
-        print(f"current version backed up to: {backup}")
-
-        copied = 0
-        for src in source.rglob("*"):
-            if src.is_dir() or any(part in (".git", "__pycache__") for part in src.parts):
-                continue
-            dst = here / src.relative_to(source)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            copied += 1
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-    print(f"Updated to {latest} ({copied} files).")
-    print("Restart the menu, and Claude Code, so the new version is loaded.")
-    log(f"updated {local_version()} -> {latest}")
-    return 0
 
 
 # ------------------------------------------------------------------ commands
@@ -2114,7 +2097,19 @@ def _pack_create(args, cfg, packs):
     for parent in extends:
         require_pack(packs, parent)
     skills = [s for s in dict.fromkeys(args.skills or []) if not is_self(s)]
-    if args.from_project:
+    if getattr(args, "from_usage", False):
+        where = args.from_project or str(Path.cwd())
+        top = int(getattr(args, "top", None) or 8)
+        used = usage_for_project(where, cfg)[:top]
+        if not used:
+            raise SyncError(f"no recorded skill usage for {where}. Build the history with "
+                            f"`usage scan --full`, and check `usage show` for what is there.")
+        print(f"from usage in {where}:")
+        for used_name, count in used:
+            print(f"  {used_name:<28} used {count}x")
+            if used_name not in skills and not is_self(used_name):
+                skills.append(used_name)
+    elif args.from_project:
         for s in scan_project_skills(args.from_project):
             if s not in skills:
                 skills.append(s)
@@ -2506,6 +2501,220 @@ def cmd_pack(args):
     return PACK_ACTIONS[action](args, cfg, packs)
 
 
+# --------------------------------------------------------------- usage counter
+
+# Which skills actually get used in which project, so a pack can eventually be proposed
+# from evidence instead of from memory. The signal is mined from Claude Code's own
+# transcripts, reading only the bytes appended since the last scan, because the folder is
+# hundreds of megabytes and this runs from the Stop hook.
+CLAUDE_PROJECTS_DIR = HOME / ".claude" / "projects"
+USAGE_BUDGET_BYTES = 40 * 1024 * 1024
+USAGE_HOOK_BUDGET_BYTES = 8 * 1024 * 1024
+USAGE_SKILL_RE = re.compile(
+    r'"skill"\s*:\s*"([^"]{1,80})"|<command-name>/?([A-Za-z0-9_:.-]{1,80})</command-name>')
+USAGE_CWD_RE = re.compile(r'"cwd"\s*:\s*"((?:[^"\\]|\\.){1,400})"')
+
+
+def merge_usage_case_duplicates(u) -> None:
+    """Windows hands out both `C:\\x` and `c:\\x` for the same folder.
+
+    Two spellings meant two buckets and a project's counts split between them, so the
+    first spelling seen wins and the rest are folded into it.
+    """
+    seen = {}
+    for key in list(u["projects"]):
+        norm = os.path.normcase(key)
+        if norm not in seen:
+            seen[norm] = key
+            continue
+        keep = u["projects"][seen[norm]]
+        drop = u["projects"].pop(key)
+        skills = keep.setdefault("skills", {})
+        for name, count in (drop.get("skills") or {}).items():
+            skills[name] = skills.get(name, 0) + count
+        keep["sessions"] = int(keep.get("sessions") or 0) + int(drop.get("sessions") or 0)
+
+
+def usage_project_key(u, project: str) -> str:
+    """The bucket this path belongs to, matching case-insensitively where that applies."""
+    if project in u["projects"]:
+        return project
+    norm = os.path.normcase(project)
+    for existing in u["projects"]:
+        if os.path.normcase(existing) == norm:
+            return existing
+    return project
+
+
+def usage_state():
+    st = load_state()
+    u = st.get("usage")
+    if not isinstance(u, dict):
+        u = {}
+    u.setdefault("projects", {})
+    u.setdefault("scan", {})
+    merge_usage_case_duplicates(u)
+    st["usage"] = u
+    return st, u
+
+
+def usage_known_names(cfg) -> set:
+    """Only real skills are counted.
+
+    Transcripts also carry `/model`, `/clear` and every other CLI command; intersecting
+    with what is actually installed drops that noise without maintaining a denylist.
+    """
+    names = set(local_skills_map(cfg))
+    for p in load_packs(cfg or {}).values():
+        names |= set(p.get("skills") or [])
+    return names
+
+
+def scan_usage(cfg, budget_bytes=USAGE_BUDGET_BYTES, full=False) -> dict:
+    result = {"files": 0, "bytes": 0, "hits": 0, "projects": 0, "pending": 0}
+    if not CLAUDE_PROJECTS_DIR.is_dir():
+        return result
+    known = usage_known_names(cfg)
+    st, u = usage_state()
+    if full:
+        # Forgetting the offsets without forgetting the counts would re-read every
+        # transcript and add its hits a second time, inflating everything.
+        u["scan"] = {}
+        u["projects"] = {}
+    touched = set()
+    for folder in sorted(CLAUDE_PROJECTS_DIR.iterdir()):
+        if not folder.is_dir():
+            continue
+        for f in sorted(folder.glob("*.jsonl")):
+            key = str(f)
+            rec = u["scan"].get(key) or {}
+            try:
+                size = f.stat().st_size
+            except OSError:
+                continue
+            offset = int(rec.get("offset") or 0)
+            if offset > size:
+                offset = 0                      # rewritten or rotated: start over
+            if offset >= size:
+                continue
+            if result["bytes"] >= budget_bytes:
+                result["pending"] += 1          # next run picks this one up
+                continue
+            room = budget_bytes - result["bytes"]
+            try:
+                with open(f, "rb") as fh:
+                    fh.seek(offset)
+                    raw = fh.read(min(size - offset, room))
+            except OSError:
+                continue
+            # Stop at the last complete line: the session being closed right now is still
+            # appending, and half a line would both miscount and corrupt the offset.
+            cut = raw.rfind(b"\n")
+            if cut == -1:
+                continue
+            consumed = cut + 1
+            text = raw[:consumed].decode("utf-8", errors="replace")
+            result["bytes"] += consumed
+            result["files"] += 1
+
+            project = rec.get("project") or ""
+            if not project:
+                m = USAGE_CWD_RE.search(text)
+                project = m.group(1).replace("\\\\", "\\") if m else folder.name
+            project = usage_project_key(u, project)
+            bucket = u["projects"].setdefault(project, {})
+            skills = bucket.setdefault("skills", {})
+            for m in USAGE_SKILL_RE.finditer(text):
+                name = (m.group(1) or m.group(2) or "").split(":")[-1].strip()
+                if name and name in known:
+                    skills[name] = skills.get(name, 0) + 1
+                    result["hits"] += 1
+            if not rec:
+                bucket["sessions"] = int(bucket.get("sessions") or 0) + 1
+            bucket["last_seen"] = now_iso()
+            u["scan"][key] = {"offset": offset + consumed, "project": project}
+            touched.add(project)
+            if offset + consumed < size:
+                result["pending"] += 1          # budget ran out mid-file, or a partial line
+
+    u["updated_at"] = now_iso()
+    save_json(STATE_FILE, st)
+    result["projects"] = len(touched)
+    return result
+
+
+def usage_for_project(project=None, cfg=None) -> list:
+    """[(skill, count)] for one project, or across all of them, most used first."""
+    _st, u = usage_state()
+    wanted = None
+    if project:
+        try:
+            wanted = str(Path(project).expanduser().resolve()).lower()
+        except OSError:
+            wanted = str(project).lower()
+    totals = {}
+    for key, bucket in u["projects"].items():
+        if wanted is not None:
+            try:
+                here = str(Path(key).expanduser().resolve()).lower()
+            except OSError:
+                here = key.lower()
+            if here != wanted:
+                continue
+        for name, n in (bucket.get("skills") or {}).items():
+            totals[name] = totals.get(name, 0) + n
+    return sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def cmd_usage(args):
+    cfg = load_config() or {}
+    action = getattr(args, "usage_action", None) or "show"
+    if action == "scan":
+        budget = float(getattr(args, "budget_mb", None) or 40)
+        res = scan_usage(cfg, budget_bytes=int(budget * 1024 * 1024),
+                         full=getattr(args, "full", False))
+        print(f"read {human_size(res['bytes'])} from {res['files']} transcript(s): "
+              f"{res['hits']} skill invocation(s) in {res['projects']} project(s)")
+        if res["pending"]:
+            print(f"{res['pending']} transcript(s) left for the next scan (byte budget). "
+                  f"Raise it with --budget-mb, or just run it again.")
+        return 0
+
+    _st, u = usage_state()
+    if not u["projects"]:
+        print("Nothing recorded yet. Build the history with:\n"
+              "    python sync.py usage scan --full\n"
+              "From then on the Stop hook keeps it up to date by itself.")
+        return 2
+    top = int(getattr(args, "top", None) or 10)
+    project = getattr(args, "project", None)
+    if project:
+        rows = usage_for_project(project, cfg)
+        print(f"{Path(project).expanduser().resolve()}\n")
+        if not rows:
+            print("  no skill usage recorded for this project")
+            return 2
+        for name, n in rows[:top]:
+            print(f"  {name:<30} {n}")
+        return 0
+
+    print(f"skill usage per project (last scan {str(u.get('updated_at'))[:16]})\n")
+    order = sorted(u["projects"].items(),
+                   key=lambda kv: -sum((kv[1].get("skills") or {}).values()))
+    for key, bucket in order:
+        skills = bucket.get("skills") or {}
+        if not skills:
+            continue
+        best = sorted(skills.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
+        print(f"  {key}   ({bucket.get('sessions') or 0} session(s))")
+        print(f"      {', '.join(f'{n} ({c})' for n, c in best)}")
+    total = sum(sum((b.get('skills') or {}).values()) for b in u["projects"].values())
+    print(f"\n{total} invocation(s) recorded. "
+          f"`pack create <name> --from-usage --from-project <folder>` turns one project's "
+          f"top skills into a pack.")
+    return 0
+
+
 def cmd_resolve(args):
     cfg = require_config()
     git_sync_in(cfg)
@@ -2820,10 +3029,16 @@ def cmd_hook_stop(args):
     auto-pushing as before - that direction was never the complaint.
     """
     cfg = load_config()
-    if not cfg or not shutil.which("rclone"):
+    if not cfg or not rclone_bin(required=False):
         return 0
     if lock_is_live():
         return 0                                 # a real sync is running; it will cover this
+    # Usage counting runs before the early return below: most sessions change no skill at
+    # all, and those are exactly the sessions whose usage is worth recording.
+    try:
+        scan_usage(cfg, budget_bytes=USAGE_HOOK_BUDGET_BYTES)
+    except Exception as e:                                    # never break a session
+        log(f"usage scan skipped: {e!r}")
     changed = changed_since_state()
     if not changed:
         return 0
@@ -2956,7 +3171,7 @@ def cmd_confirm_new(args):
 def cmd_hook_session_start(args):
     """One-line notice when the remote has skills this machine does not."""
     cfg = load_config()
-    if not cfg or not shutil.which("rclone"):
+    if not cfg or not rclone_bin(required=False):
         return 0
     st = load_state()
     if not args.force and time.time() - float(st.get("last_remote_check") or 0) < REMOTE_CHECK_INTERVAL:
@@ -3032,7 +3247,17 @@ def cmd_update(args):
                     raise SyncError(f"Security error: invalid path traversal detected in archive entry '{name}'")
             
             with tempfile.TemporaryDirectory(prefix="skill-sync-update-") as tmp_extract:
-                z.extractall(tmp_extract)
+                # Extracted one member at a time, each resolved path checked against the
+                # destination, instead of extractall(). The guard above already rejects
+                # traversal, but extractall is the call auditors flag and there is no
+                # reason to keep it when the loop is this cheap.
+                base = Path(tmp_extract).resolve()
+                for member in z.infolist():
+                    out = (base / member.filename).resolve()
+                    if base != out and base not in out.parents:
+                        raise SyncError(f"Security error: archive entry escapes the "
+                                        f"extraction folder: '{member.filename}'")
+                    z.extract(member, tmp_extract)
                 extracted_items = list(Path(tmp_extract).iterdir())
                 if not extracted_items:
                     raise SyncError("Update archive is empty")
@@ -3145,6 +3370,11 @@ def build_parser():
     pp.add_argument("--extends", nargs="+", default=[], help="packs to inherit from")
     pp.add_argument("--from-project", dest="from_project",
                    help="seed it with the skills already in this project")
+    pp.add_argument("--from-usage", dest="from_usage", action="store_true",
+                   help="seed it with the skills actually used in --from-project "
+                        "(see `usage show`)")
+    pp.add_argument("--top", type=int, default=8,
+                   help="how many of the most used skills --from-usage takes")
     pp.add_argument("--group", help="label for grouping packs in `pack list`")
     pp.add_argument("--client", help="default client for this pack")
     pp.add_argument("--link", action="store_true", help="default to symlinks, not copies")
@@ -3192,6 +3422,19 @@ def build_parser():
     pp = psub.add_parser("fetch", help="bring pack definitions down from the remote")
     pp.add_argument("--keep-local", dest="keep_local", action="store_true",
                    help="do not overwrite a pack that already exists here")
+
+    s = sub.add_parser("usage", help="per-project skill usage, mined from the transcripts")
+    s.set_defaults(func=cmd_usage)
+    usub = s.add_subparsers(dest="usage_action", metavar="<action>")
+    up = usub.add_parser("scan", help="record invocations appended since the last scan")
+    up.add_argument("--full", action="store_true",
+                    help="rebuild the counts from every transcript; history whose "
+                         "transcript is gone is not recovered")
+    up.add_argument("--budget-mb", dest="budget_mb", type=float, default=40,
+                    help="stop after this many MB and leave the rest for next time")
+    up = usub.add_parser("show", help="what has been recorded")
+    up.add_argument("--project", help="only this project")
+    up.add_argument("--top", type=int, default=10)
 
     s = sub.add_parser("resolve", help="resolve a conflict, keeping one side")
     s.add_argument("skill")

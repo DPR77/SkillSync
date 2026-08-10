@@ -23,17 +23,22 @@ A bare `/skill-sync` always points back to the menu, even if a subcommand ran ea
 the same session. Run individual subcommands only when the message asks for that specific
 thing ("push my skills", "what's out of sync?"), or when diagnosing a failure.
 
+**Use this skill's own folder** — the directory this SKILL.md sits in — not a hardcoded
+path. Depending on how it was installed the skill lives in `~/.claude/skills/skill-sync`,
+`~/.agents/skills/skill-sync` (what `npx skills add` uses, symlinked into the clients) or
+`~/.gemini/config/skills/skill-sync`, so a fixed path is wrong about as often as it is right.
+
 Windows — **always cmd, never PowerShell** (`Start-Process` only spawns the window):
 
 ```
-Start-Process cmd -ArgumentList '/K','python %USERPROFILE%\.claude\skills\skill-sync\scripts\menu.py'
+Start-Process cmd -ArgumentList '/K','python "<this skill folder>\scripts\menu.py"'
 ```
 
 macOS/Linux (Bash tool) — swap `x-terminal-emulator` for the terminal the user has
 (`gnome-terminal`, `konsole`, `xterm`, or `open -a Terminal.app` on macOS):
 
 ```
-nohup x-terminal-emulator -e "python3 ~/.claude/skills/skill-sync/scripts/menu.py" >/dev/null 2>&1 &
+nohup x-terminal-emulator -e "python3 '<this skill folder>/scripts/menu.py'" >/dev/null 2>&1 &
 ```
 
 `menu.py` refuses to run inside tool calls and the `!` prefix, which have no real TTY; a
@@ -47,6 +52,7 @@ below instead. Everything the menu does is available as one.
 | `setup --remote <remote:> --categories work,school,personal` | one-time configuration on each computer |
 | `setup --git <url> [--git-branch main]` | use a git repository instead of a cloud remote |
 | `pack <action>` | bundles of skills deployed into one project or one client (see "Packs") |
+| `usage scan` / `usage show` | which skills actually get used in which project (see "Usage") |
 | `status` | what is local-only, remote-only, newer, or conflicting |
 | `push [skill...]` | upload changed skills (`--dry-run`, `--force`, `--no-scan`, `--budget <seconds>`, `--threads <N>`) |
 | `pull [category...]` | download; bare `pull` lists what the remote has (`--skills`, `--dest`, `--force`, `--threads <N>`) |
@@ -63,13 +69,26 @@ Exit codes: `0` fine, `1` error or blocked, `2` the user must choose something.
 
 ## First run on a computer
 
+**Open the menu and let the user drive it.** With nothing configured it goes straight into
+Setup, which lists the providers, offers to install rclone if it is missing, creates the
+groups and does the first upload. That is one screen instead of the four steps below, and it
+needs no credentials in a tool call.
+
+`scripts/install.py` does the same thing unattended, but it configures cloud storage and
+registers hooks, so do not run it on the user's behalf without being asked to.
+
+By hand, when the menu is not an option:
+
 1. `python scripts/sync.py doctor` — confirms whether rclone and a config exist.
-2. If rclone is missing, tell the user to install it and to run `rclone config`
+2. If rclone is missing, tell the user to install it (`winget install Rclone.Rclone`,
+   `brew install rclone`, `sudo apt install rclone`) and to run `rclone config`
    **themselves** — it is interactive, so Claude cannot drive it (in Claude Code they can
-   prefix it with `!`). Per-provider steps: `references/providers.md`.
+   prefix it with `!`). Per-provider steps: `references/providers.md`. If they say it is
+   already installed, they are probably right: a terminal opened before the install keeps
+   the old PATH, and `doctor` reports the path it found off-PATH.
 3. Ask which categories they want, then
    `python scripts/sync.py setup --remote <remote:> --categories work,school,personal`.
-   Do not invent categories.
+   Do not invent categories. For a git repo instead: `setup --git <url>`.
 4. Recommended: `python scripts/install_hooks.py`, so changed skills upload automatically
    at the end of every session.
 
@@ -161,6 +180,29 @@ Remote layout:
 - **skill-sync does not sync itself** — it would be uploading the tool mid-upload, and a
   pull could replace the running code underneath it. It is excluded from `push`, `pull` and
   the Stop hook, and updates from GitHub via `update`.
+
+## Usage
+
+`usage` records which skills are actually invoked in which project, so a pack can be built
+from evidence rather than from memory:
+
+```
+usage scan [--full] [--budget-mb 40]     record what is new (the Stop hook does this)
+usage show [--project <folder>] [--top N]
+pack create acme --from-usage --from-project C:\dev\acme [--top 8]
+```
+
+- The signal is mined from Claude Code's own transcripts in `~/.claude/projects/`, reading
+  only the bytes appended since the last scan. State lives in `state.json` under `usage`.
+- Only skills installed on this machine (or named in a pack) are counted, which is what
+  drops `/model`, `/clear` and the rest of the CLI commands without a denylist.
+- Projects are keyed by the `cwd` recorded in the transcript, not the folder slug.
+- The Stop hook scans within an 8 MB budget and never blocks a session; a scan stops at the
+  last complete line, so the session being closed is counted next time.
+- `usage scan --full` rebuilds the counts from every transcript still on disk. History whose
+  transcript is gone is not recovered, so it is a repair tool, not a routine one.
+- **Expect thin data at first.** It only counts explicit invocations from the moment
+  scanning starts, so treat a fresh `usage show` as a floor, not a verdict.
 
 ## A git repository as the provider
 

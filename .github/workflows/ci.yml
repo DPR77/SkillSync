@@ -64,6 +64,9 @@ jobs:
       - name: edge_test.py — pathological inputs
         run: python scripts/edge_test.py
 
+      - name: usage_test.py — usage counter bookkeeping
+        run: python scripts/usage_test.py
+
       - name: menu.py — rendering self-check
         run: python scripts/menu.py --self-check
 

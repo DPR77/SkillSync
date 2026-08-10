@@ -44,41 +44,54 @@ def check_python_version():
         sys.exit(1)
 
 
+def find_rclone():
+    """PATH first, then the folders winget, Scoop and Homebrew install into."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import sync
+        return sync.rclone_bin(required=False)
+    except Exception:
+        return shutil.which("rclone")
+
+
 def ensure_rclone():
-    exe = shutil.which("rclone")
+    exe = find_rclone()
     if exe:
         log(f"rclone found: {exe}")
         return True
 
-    log("rclone not found. Auto-installing rclone...")
     system = platform.system().lower()
-    try:
-        if system == "windows":
-            subprocess.run(["winget", "install", "Rclone.Rclone", "--accept-source-agreements", "--accept-package-agreements"], check=True)
-        elif system == "darwin":
-            subprocess.run(["brew", "install", "rclone"], check=True)
-        elif system == "linux":
-            log("Installing rclone via system package manager...")
-            if shutil.which("apt-get"):
-                subprocess.run(["sudo", "apt-get", "update", "-y"], check=False)
-                subprocess.run(["sudo", "apt-get", "install", "-y", "rclone"], check=True)
-            elif shutil.which("dnf"):
-                subprocess.run(["sudo", "dnf", "install", "-y", "rclone"], check=True)
-            elif shutil.which("pacman"):
-                subprocess.run(["sudo", "pacman", "-S", "--noconfirm", "rclone"], check=True)
-            else:
-                log("Please install rclone using your distribution package manager (e.g. sudo apt install rclone).")
+    # Unprivileged package managers are run for the user; anything needing root is only
+    # printed. An installer that quietly calls sudo is both a security smell auditors
+    # flag and a hang waiting for a password prompt nobody sees.
+    unprivileged = {
+        "windows": ["winget", "install", "Rclone.Rclone", "--accept-source-agreements",
+                    "--accept-package-agreements"],
+        "darwin": ["brew", "install", "rclone"],
+    }.get(system)
+    if unprivileged:
+        log(f"rclone not found. Installing with: {' '.join(unprivileged)}")
+        try:
+            subprocess.run(unprivileged, check=True)
+        except Exception as e:
+            log(f"rclone installation failed: {e}")
+    else:
+        if shutil.which("apt-get"):
+            hint = "sudo apt-get install -y rclone"
+        elif shutil.which("dnf"):
+            hint = "sudo dnf install -y rclone"
+        elif shutil.which("pacman"):
+            hint = "sudo pacman -S rclone"
         else:
-            log(f"Unsupported OS for auto-install: {system}. Install rclone manually.")
-            return False
-    except Exception as e:
-        log(f"Rclone auto-installation warning: {e}")
+            hint = "install rclone with your package manager"
+        log(f"rclone is not installed. Run this yourself, it needs root:\n    {hint}")
         return False
 
-    exe = shutil.which("rclone")
+    exe = find_rclone()
     if exe:
         log(f"rclone installed successfully: {exe}")
         return True
+    log("rclone still not found. Open a new terminal so PATH picks it up, then rerun.")
     return False
 
 
