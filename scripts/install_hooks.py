@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -38,13 +39,29 @@ STOP_TIMEOUT = 120
 SESSION_TIMEOUT = 20
 
 
+def is_interpreter(exe: str) -> bool:
+    """True when the path actually runs Python, not just when it exists.
+
+    Windows puts App Execution Alias stubs for python.exe and python3.exe in
+    WindowsApps and they are always on PATH, whether or not Python was ever
+    installed from the Store. shutil.which finds one, but running it prints
+    "Python was not found" and exits non-zero, so a hook pointed at the stub
+    fails on every single session.
+    """
+    try:
+        return subprocess.run([exe, "-c", ""], capture_output=True,
+                              timeout=30).returncode == 0
+    except Exception:
+        return False
+
+
 def python_exe() -> str:
     """Interpreter to run the hook with, preferring a stable name over a venv path."""
     exe = Path(sys.executable)
     if "venv" in exe.parts or ".venv" in exe.parts:
         for candidate in ("python3", "python"):
             found = shutil.which(candidate)
-            if found:
+            if found and is_interpreter(found):
                 return Path(found).as_posix()
     return exe.as_posix()
 

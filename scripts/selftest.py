@@ -28,6 +28,31 @@ HERE = Path(__file__).resolve().parent
 SYNC = HERE / "sync.py"
 
 
+def load_module(name: str):
+    """Import one of our scripts by path so its helpers can be tested directly."""
+    import importlib.util
+    key = f"_{name}_for_test"
+    module = sys.modules.get(key)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(key, HERE / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[key] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def fake_python_stub(root: Path) -> Path:
+    """A stand-in for Windows' App Execution Alias: on PATH, exits non-zero, runs nothing."""
+    if os.name == "nt":
+        stub = root / "fake-python.cmd"
+        stub.write_text("@echo Python was not found\r\n@exit /b 9009\r\n", encoding="utf-8")
+    else:
+        stub = root / "fake-python"
+        stub.write_text("#!/bin/sh\necho 'Python was not found'\nexit 9009\n", encoding="utf-8")
+        os.chmod(stub, 0o755)
+    return stub
+
+
 def menu_visible_len(line: str) -> int:
     """menu.py's own width calculation, so the UI checks measure what it measures."""
     import importlib.util
@@ -419,6 +444,15 @@ def main() -> int:
         commands = [h["command"] for g in data.get("hooks", {}).get("Stop", []) for h in g["hooks"]]
         check("uninstalling removes only our own hook",
               commands == ["echo skill-sync is great"], commands)
+
+        ih = load_module("install_hooks")
+        check("the interpreter written into the hook actually runs Python",
+              ih.is_interpreter(ih.python_exe()), ih.python_exe())
+        check("a real interpreter is recognised", ih.is_interpreter(sys.executable))
+        check("a path that does not exist is not an interpreter",
+              not ih.is_interpreter(str(root / "no-such-python")))
+        check("a stub that exits non-zero is rejected, not written into the hook",
+              not ih.is_interpreter(str(fake_python_stub(root))))
 
     finally:
         failed = [r for r in results if r[0] == FAIL]
