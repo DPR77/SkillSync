@@ -255,7 +255,8 @@ def visible_len(s: str) -> int:
 # in for - 2 cells for the emoji, 1 for the arrows and ticks - so the substitution can
 # happen at render time without shifting a single column. Widths are asserted by selftest.
 ASCII_FALLBACK = {
-    "🟢": "ok", "⚡": "^^", "☁️": "vv", "📦": "--", "📥": "<<", "🚨": "!!",
+    "🟢": "ok", "⚡": "^^", "☁️": "vv", "📦": "--", "📥": "<<", "🚨": "!!", "🧩": "[]",
+    "🌿": "gt",
     "🔵": "C:", "🟣": "G:", "🟠": "A:", "⚪": "L:",
     "📊": "==", "📤": ">>", "🏷️": "##", "⚔️": "xx", "🔄": "@@", "🔧": "st",
     "🩺": "dr", "🗑️": "rm", "❓": "??", "🚪": "qq",
@@ -838,10 +839,16 @@ def screen_group_detail(term, cfg, status, group_name):
                 lines.append(f"    {pad(name, 22)} {origin}  {badge}")
         else:
             lines.append(C.dim("    (no skills in this group yet)"))
+        subgroups = sorted(c for c in (cfg.get("categories") or [])
+                           if c.startswith(group_name + "/"))
+        if subgroups:
+            lines += ["", f"  {C.dim('subgroups:')} "
+                          f"{', '.join(s.rsplit('/', 1)[-1] for s in subgroups)}"]
         lines += [
             "",
             C.dim("─" * min(term_size()[0], 100)),
             f"  {C.bold('a')} {C.dim('assign skills')}   "
+            f"{C.bold('s')} {C.dim('new subgroup')}   "
             f"{C.bold('n')} {C.dim('rename group')}   "
             f"{C.bold('esc')} {C.dim('back')}",
         ]
@@ -849,6 +856,23 @@ def screen_group_detail(term, cfg, status, group_name):
         key = term.read_key()
         if key in ("esc", "q"):
             return
+        if key == "s":
+            leaf = term.ask(f"  new subgroup inside '{group_name}': ")
+            if not leaf:
+                continue
+            child = f"{group_name}/{leaf.strip().strip('/')}"
+            cats_cfg = list(dict.fromkeys(list(cfg.get("categories") or []) + [child]))
+            run_action(term, f"add subgroup {child}",
+                       lambda: sync.cmd_setup(Namespace(
+                           remote=cfg.get("remote"), root=cfg.get("root"),
+                           categories=",".join(cats_cfg),
+                           default_category=cfg.get("default_category"),
+                           machine=cfg.get("machine"))))
+            cfg = sync.load_config() or cfg
+            if child in (cfg.get("categories") or []):
+                screen_group_detail(term, cfg, status, child)
+                status = load_status(term, cfg, force=True)
+            continue
         if key == "n":
             new_name = term.ask(f"  rename '{group_name}' to: ")
             if new_name and new_name != group_name:
@@ -938,10 +962,16 @@ def screen_groups(term, cfg, status):
                         for c in cats}
 
         lines = header(cfg)
-        lines += [C.bold("  Groups"), ""]
+        lines += [C.bold("  Groups"),
+                  C.dim("  a group can hold subgroups: work / work/acme / work/quimera"),
+                  ""]
+        # Sorted so a subgroup always sits under its parent, indented one level per "/".
+        cats = sorted(cats)
         for cat in cats:
             n = group_counts.get(cat, 0)
-            pill = C.cyan(f"  {cat}")
+            depth = cat.count("/")
+            leaf = cat.rsplit("/", 1)[-1]
+            pill = C.cyan(f"  {'  ' * depth}{leaf}")
             count = C.dim(f"  {n} skill{'s' if n != 1 else ''}")
             lines.append(f"    {pill}{count}")
         if ungrouped:
@@ -1007,6 +1037,291 @@ def screen_groups(term, cfg, status):
                     # Drill into a group
                     screen_group_detail(term, cfg, status, choice)
                     status = load_status(term, cfg, force=True)
+
+
+# -------------------------------------------------------------------- packs
+
+def pack_args(action, **kw):
+    """Namespace with every field the sync.py pack handlers read, so the menu can call
+    them the same way the CLI does."""
+    base = dict(pack_action=action, name=None, project=None, here=False, client=None,
+                link=False, copy=False, force=False, no_pull=False, dry_run=False,
+                skills=[], extends=[], from_project=None, group=None,
+                from_client=None, to_client=None, keep_local=False)
+    base.update(kw)
+    return Namespace(**base)
+
+
+PACK_CLIENTS = ["claude", "gemini", "agents", "cursor", "antigravity", "opencode"]
+
+
+def ask_client(term, cfg, title="Which client?"):
+    items = [{"key": c} for c in PACK_CLIENTS]
+    picked = Picker(items, lambda it, ch: f"{pad(it['key'], 14)} "
+                                         f"{C.dim(str(sync.CLIENT_PROJECT_DIRS[it['key']]))}",
+                    title, single=True,
+                    hint="cursor, antigravity and opencode share .agents/skills").run(term, cfg)
+    return picked[0]["key"] if picked else None
+
+
+def ask_project(term, cfg, why="deploy into"):
+    path = term.ask(f"  project folder to {why} (blank = machine-wide): ")
+    if not path:
+        return None
+    p = Path(path.strip('"')).expanduser()
+    if not p.exists():
+        term.draw(header(cfg) + ["  " + C.red(f"{p} does not exist"), "",
+                                 C.dim("  press any key")])
+        term.read_key()
+        return False
+    return str(p)
+
+
+def pack_rows(cfg, packs):
+    lines = []
+    lmap = sync.local_skills_map(cfg)
+    by_group = {}
+    for name, p in packs.items():
+        by_group.setdefault(p.get("group") or "", []).append(name)
+    for group in sorted(by_group):
+        if group:
+            lines.append(f"    {C.dim(group + '/')}")
+        for name in sorted(by_group[group]):
+            try:
+                skills = sync.resolve_pack(packs, name)
+            except sync.SyncError as e:
+                lines.append(f"    {C.cyan(pad(name, 18))} {C.red(str(e)[:50])}")
+                continue
+            missing = [s for s in skills if s not in lmap]
+            tail = C.yellow(f"{len(missing)} to download") if missing else C.dim("all here")
+            ext = packs[name].get("extends") or []
+            ext_s = C.dim(f"extends {', '.join(ext)}") if ext else ""
+            lines.append(f"    {C.cyan(pad(name, 18))} "
+                         f"{pad(plural(len(skills), 'skill'), 11)} {pad(tail, 18)} {ext_s}")
+    return lines
+
+
+def screen_pack_detail(term, cfg, status, name):
+    while True:
+        cfg = sync.load_config() or cfg
+        packs = sync.load_packs(cfg)
+        if name not in packs:
+            return
+        pack = packs[name]
+        try:
+            skills = sync.resolve_pack(packs, name)
+        except sync.SyncError as e:
+            skills = []
+            term.draw(header(cfg) + ["  " + C.red(str(e)), "", C.dim("  press any key")])
+            term.read_key()
+            return
+        lmap = sync.local_skills_map(cfg)
+        own = set(pack.get("skills") or [])
+        lines = header(cfg) + [
+            f"  {C.bold('Pack:')}  {C.cyan(name)}   "
+            f"{C.dim(plural(len(skills), 'skill'))}"
+            + (f"   {C.dim('extends ' + ', '.join(pack['extends']))}"
+               if pack.get("extends") else ""),
+            f"  {C.dim('default client')} {pack.get('client') or 'claude'}   "
+            f"{C.dim('mode')} {pack.get('mode') or 'copy'}"
+            + (f"   {C.dim('group')} {pack['group']}" if pack.get("group") else ""),
+            "",
+        ]
+        for s in skills:
+            here = C.green("here") if s in lmap else C.yellow("download")
+            tag = "" if s in own else C.dim(" (inherited)")
+            lines.append(f"    {pad(s, 28)} {here}{tag}")
+        lines += [
+            "",
+            C.dim("─" * min(term_size()[0], 100)),
+            f"  {C.bold('a')} {C.dim('apply to a project')}   "
+            f"{C.bold('s')} {C.dim('edit skills')}   "
+            f"{C.bold('m')} {C.dim('move between clients')}   "
+            f"{C.bold('u')} {C.dim('uninstall from a project')}",
+            f"  {C.bold('w')} {C.dim('where is it applied')}   "
+            f"{C.bold('p')} {C.dim('publish to remote')}   "
+            f"{C.bold('d')} {C.dim('delete pack')}   "
+            f"{C.bold('esc')} {C.dim('back')}",
+        ]
+        term.draw(lines)
+        key = term.read_key()
+        if key in ("esc", "q"):
+            return
+
+        if key == "a":
+            project = ask_project(term, cfg)
+            if project is False:
+                continue
+            client = ask_client(term, cfg, f"Apply '{name}' to which client?")
+            if not client:
+                continue
+            mode = Picker([{"key": "copy", "d": "self-contained copy, can be committed "
+                                                "with the project"},
+                           {"key": "link", "d": "junction to the master copy, follows "
+                                                "future edits"}],
+                          lambda it, ch: f"{pad(it['key'], 8)} {C.dim(it['d'])}",
+                          "Copy the files or link them?", single=True).run(term, cfg)
+            if not mode:
+                continue
+            link = mode[0]["key"] == "link"
+            run_action(term, f"pack apply {name} -> {client}",
+                       lambda: sync.cmd_pack(pack_args(
+                           "apply", name=name, project=project, client=client,
+                           link=link, copy=not link, force=False)))
+        elif key == "s":
+            all_local = sorted(sync.local_skills_map(cfg))
+            items = [{"key": s, "info": status.get(s, {"state": "?", "size": 0,
+                                                       "local": True})}
+                     for s in all_local]
+            pre = [k for k, it in enumerate(items) if it["key"] in own]
+            picker = Picker(items, skill_row, f"Which skills are in '{name}'?",
+                            checked=pre,
+                            hint="inherited skills are not listed here - edit the parent pack")
+            chosen = picker.run(term, cfg, summary_line(status) if status else None)
+            if chosen is None:
+                continue
+            wanted = {c["key"] for c in chosen}
+            add, remove = sorted(wanted - own), sorted(own - wanted)
+            if not add and not remove:
+                continue
+            if not confirm(term, cfg, f"Update pack '{name}'",
+                           [f"{C.green('+')} {s}" for s in add]
+                           + [f"{C.yellow('-')} {s}" for s in remove],
+                           note="Only this pack's own list changes; projects already "
+                                "deployed keep what they have until you apply again."):
+                continue
+
+            def do():
+                if add:
+                    sync.cmd_pack(pack_args("add", name=name, skills=add))
+                if remove:
+                    sync.cmd_pack(pack_args("rm", name=name, skills=remove))
+            run_action(term, f"pack edit {name}", do)
+        elif key == "m":
+            project = ask_project(term, cfg, "move inside")
+            if project is False:
+                continue
+            src = ask_client(term, cfg, "Move FROM which client?")
+            if not src:
+                continue
+            dst = ask_client(term, cfg, "Move TO which client?")
+            if not dst:
+                continue
+            if not confirm(term, cfg, f"Move '{name}' from {src} to {dst}",
+                           [f"{len(skills)} skill folder(s)",
+                            f"source: {sync.pack_dest(src, project)}",
+                            f"target: {sync.pack_dest(dst, project)}"],
+                           note="Only this pack's skills move. The originals are backed "
+                                f"up under {sync.TRASH_DIR}"):
+                continue
+            run_action(term, f"pack move {name} {src} -> {dst}",
+                       lambda: sync.cmd_pack(pack_args(
+                           "move", name=name, project=project, from_client=src,
+                           to_client=dst, force=False)))
+        elif key == "u":
+            project = ask_project(term, cfg, "uninstall from")
+            if project is False:
+                continue
+            client = ask_client(term, cfg, f"Uninstall '{name}' from which client?")
+            if not client:
+                continue
+            if not confirm(term, cfg, f"Uninstall '{name}' from {client}",
+                           [str(sync.pack_dest(client, project))],
+                           note=f"Folders are moved to {sync.TRASH_DIR}, not erased. "
+                                "The pack definition itself stays."):
+                continue
+            run_action(term, f"pack remove {name}",
+                       lambda: sync.cmd_pack(pack_args(
+                           "remove", name=name, project=project, client=client)))
+        elif key == "w":
+            project = ask_project(term, cfg, "inspect")
+            if project is False:
+                continue
+            run_action(term, f"pack where", lambda: sync.cmd_pack(
+                pack_args("where", project=project)))
+        elif key == "p":
+            run_action(term, "pack publish", lambda: sync.cmd_pack(pack_args("publish")))
+        elif key == "d":
+            if not confirm(term, cfg, f"Delete the pack '{name}'",
+                           ["the definition only"],
+                           note="Skills already deployed into projects are left alone."):
+                continue
+            run_action(term, f"pack delete {name}",
+                       lambda: sync.cmd_pack(pack_args("delete", name=name, force=True)))
+            return
+
+
+def screen_packs(term, cfg, status):
+    while True:
+        cfg = sync.load_config() or cfg
+        packs = sync.load_packs(cfg)
+        names = sorted(packs)
+        lines = header(cfg)
+        lines += [C.bold("  🧩 Packs"),
+                  C.dim("  a named list of skills you deploy into one project or one "
+                        "client"), ""]
+        if names:
+            lines += pack_rows(cfg, packs)
+        else:
+            lines.append("    " + C.dim("no packs yet - create one below"))
+        lines += ["", C.dim("─" * min(term_size()[0], 100))]
+        options = names + ["+ New pack", "+ New pack from a project's skills",
+                           "↓ Fetch packs from the remote", "← Back"]
+        for idx, opt in enumerate(options):
+            lines.append(f"  {C.bold(str(idx + 1))}  {opt}")
+        lines += ["", C.dim("  press a number key, or esc to go back")]
+        term.draw(lines)
+
+        key = term.read_key()
+        if key in ("esc", "q"):
+            return
+        if not key.isdigit():
+            continue
+        idx = int(key) - 1
+        if not (0 <= idx < len(options)):
+            continue
+        choice = options[idx]
+        if choice == "← Back":
+            return
+        if choice == "+ New pack":
+            name = term.ask("  pack name (e.g. web, acme, quimera): ")
+            if not name:
+                continue
+            group = term.ask("  group it under (blank = none): ") or None
+            all_local = sorted(sync.local_skills_map(cfg))
+            items = [{"key": s, "info": status.get(s, {"state": "?", "size": 0})}
+                     for s in all_local]
+            picker = Picker(items, skill_row, f"Which skills go into '{name}'?",
+                            hint="space to tick, / to filter, enter to confirm")
+            chosen = picker.run(term, cfg, summary_line(status) if status else None)
+            if not chosen:
+                continue
+            chosen_names = [c["key"] for c in chosen]
+            parents = [{"key": n} for n in names]
+            extends = []
+            if parents:
+                picked = Picker(parents, lambda it, ch: it["key"],
+                                f"Should '{name}' also inherit from an existing pack?",
+                                hint="optional - leave everything unticked to skip").run(term, cfg)
+                extends = [p["key"] for p in (picked or [])]
+            run_action(term, f"pack create {name}",
+                       lambda: sync.cmd_pack(pack_args(
+                           "create", name=name, skills=chosen_names, extends=extends,
+                           group=group)))
+        elif choice.startswith("+ New pack from"):
+            project = ask_project(term, cfg, "read skills from")
+            if not project:
+                continue
+            name = term.ask("  name for the new pack: ")
+            if not name:
+                continue
+            run_action(term, f"pack create {name} --from-project",
+                       lambda: sync.cmd_pack(pack_args(
+                           "create", name=name, from_project=project)))
+        elif choice.startswith("↓ Fetch"):
+            run_action(term, "pack fetch", lambda: sync.cmd_pack(pack_args("fetch")))
+        else:
+            screen_pack_detail(term, cfg, status, choice)
 
 
 def screen_conflicts(term, cfg, status):
@@ -1094,6 +1409,8 @@ def screen_setup(term, cfg):
          ["config", "create", "mysftp", "sftp"]),
         ("💾",  "Local folder / NAS", "local",    "local",    None,
          None),   # local handled specially — no rclone remote needed
+        ("🌿",  "Git repository",     "git",      "git",      None,
+         None),   # cloned locally, then committed and pushed for you
     ]
 
     if not exe:
@@ -1137,9 +1454,13 @@ def screen_setup(term, cfg):
 
     while True:
         items = []
+        git_active = bool(sync.git_cfg(cfg))
         for icon, name, ptype, hint, default_name, create_args in PROVIDERS:
-            is_local = (create_args is None)
-            if is_local:
+            is_git = (ptype == "git")
+            is_local = (create_args is None) and not is_git
+            if is_git:
+                found = [(cfg or {}).get("git", {}).get("url")] if git_active else []
+            elif is_local:
                 # Local is "configured" if the current remote is a local path
                 is_active = active_remote and not active_remote.endswith(":")
                 found = [active_remote] if is_active else []
@@ -1148,16 +1469,22 @@ def screen_setup(term, cfg):
                          if ptype in r.lower() or (default_name and default_name in r.lower())
                          or hint in r.lower()]
 
-            active_match = any(
-                r.rstrip(":").lower() in active_remote.lower() or
-                active_remote.lower().rstrip(":") in r.lower()
-                for r in found
-            ) if found else (is_local and found)
+            if is_git:
+                # The active remote is the clone folder, which never resembles the URL,
+                # so the git row reports on the git config instead.
+                active_match = git_active
+            else:
+                active_match = any(
+                    r.rstrip(":").lower() in active_remote.lower() or
+                    active_remote.lower().rstrip(":") in r.lower()
+                    for r in found
+                ) if found else (is_local and found)
 
             if found:
                 if active_match:
                     label = C.cyan(f"⚡ {name}")   # currently active in skill-sync
-                    detail = C.dim("active: " + (found[0] if is_local else ", ".join(r for r in sorted(found))))
+                    detail = C.dim("active: " + (found[0] if (is_local or is_git)
+                                                 else ", ".join(r for r in sorted(found))))
                 else:
                     label = C.green(f"✓  {name}")
                     detail = C.dim("configured: " + ", ".join(r for r in sorted(found)))
@@ -1169,7 +1496,7 @@ def screen_setup(term, cfg):
                 "key": name, "icon": icon, "label": label, "detail": detail,
                 "ptype": ptype, "hint": hint, "default_name": default_name,
                 "create_args": create_args, "found": found,
-                "is_local": is_local, "active_match": active_match,
+                "is_local": is_local, "is_git": is_git, "active_match": active_match,
             })
 
         def provider_row(item, checked):
@@ -1184,6 +1511,57 @@ def screen_setup(term, cfg):
             return cfg
 
         p = chosen[0]
+
+        # ── Git repository: cloned locally, then committed and pushed for you ──
+        if p.get("is_git"):
+            if not sync.git_bin(required=False):
+                term.draw(header(cfg) + [
+                    "  " + C.red("git is not installed, or not on PATH."), "",
+                    "    Windows  " + C.cyan("winget install Git.Git"),
+                    "    macOS    " + C.cyan("brew install git"),
+                    "", C.dim("  press any key")])
+                term.read_key()
+                continue
+            current = (cfg or {}).get("git", {})
+            term.draw(header(cfg) + [
+                "  " + C.bold("🌿 Git repository"), "",
+                "  " + C.dim("Your skills live in a normal git repo: one commit per sync,"),
+                "  " + C.dim("full history, and any host works (GitHub, GitLab, Gitea)."),
+                "",
+                "  " + C.dim("Example:  https://gitlab.com/yourteam/skills.git"),
+                "  " + C.dim("          git@github.com:you/skills.git"),
+                "",
+                "  " + C.yellow("Clone it by hand once first if it needs credentials -"),
+                "  " + C.yellow("skill-sync never prompts for a password."),
+                "",
+            ])
+            url_hint = f" [{current['url']}]" if current.get("url") else ""
+            url = term.ask(f"  repository URL{url_hint}: ") or current.get("url", "")
+            if not url:
+                continue
+            branch = term.ask(f"  branch [{current.get('branch') or 'main'}]: ") \
+                or current.get("branch") or "main"
+            root = term.ask(f"  folder inside the repo [{(cfg or {}).get('root') or 'ClaudeSkills'}]: ") \
+                or (cfg or {}).get("root") or "ClaudeSkills"
+            groups = term.ask(f"  groups [{','.join((cfg or {}).get('categories') or ['work', 'school', 'personal'])}]: ") \
+                or ",".join((cfg or {}).get("categories") or ["work", "school", "personal"])
+            run_action(term, f"setup --git {url}",
+                       lambda u=url, b=branch, ro=root, gr=groups: sync.cmd_setup(
+                           Namespace(remote=None, git=u, git_branch=b, root=ro,
+                                     categories=gr, default_category=None, machine=None)))
+            cfg = sync.load_config() or cfg
+            active_remote = (cfg or {}).get("remote", "")
+            git_active = bool(sync.git_cfg(cfg))
+            if confirm(term, cfg, "Upload the skills on this computer now?",
+                       ["one commit, then a push to " + url],
+                       note="Skip this on a second computer - use Download instead, so "
+                            "you do not overwrite what is already in the repo."):
+                run_action(term, "initial push",
+                           lambda: sync.cmd_push(Namespace(skills=None, all=True,
+                                                           no_scan=False, dry_run=False,
+                                                           force=False,
+                                                           assume_default=True)))
+            continue
 
         # ── Local folder: ask for path, no rclone remote needed ─────────────
         if p["is_local"]:
@@ -1317,6 +1695,7 @@ MENU = [
     ("push",      "📤", "Upload",         "Send changed skills to cloud remote"),
     ("pull",      "📥", "Download",       "Bring skill groups onto this computer"),
     ("groups",    "🏷️", "Groups",         "Organize skills into work / school / personal"),
+    ("packs",     "🧩", "Packs",          "Bundle skills and deploy them into a project"),
     ("conflicts", "⚔️", "Conflicts",      "Inspect diffs & resolve conflicting edits"),
     ("hooks",     "🔄", "Auto-Sync",      "Install or remove automatic session hooks"),
     ("setup",     "🔧", "Setup",          "Configure Rclone remote & cloud storage"),
@@ -1536,7 +1915,8 @@ def main_loop(term):
             continue
         status = load_status(term, cfg)
         {"status": status_screen, "push": screen_push, "pull": screen_pull,
-         "groups": screen_groups, "conflicts": screen_conflicts,
+         "groups": screen_groups, "packs": screen_packs,
+         "conflicts": screen_conflicts,
          "prune": screen_prune}[choice](term, cfg, status)
         status = load_status(term, cfg, force=True)
 
@@ -1552,7 +1932,8 @@ def help_lines(cfg):
         f"  {C.cyan('status')}       {C.dim('Show which skills differ between this PC and the cloud')}",
         f"  {C.cyan('push')}         {C.dim('Upload new or modified skills to the cloud remote')}",
         f"  {C.cyan('pull')}         {C.dim('Download skill categories from the cloud to this PC')}",
-        f"  {C.cyan('groups')}       {C.dim('Assign skills to categories: work / school / personal')}",
+        f"  {C.cyan('groups')}       {C.dim('Assign skills to groups, and subgroups like work/acme')}",
+        f"  {C.cyan('packs')}        {C.dim('Bundle skills, then deploy the bundle into one project')}",
         f"  {C.cyan('conflicts')}    {C.dim('View diffs and pick which version wins')}",
         f"  {C.cyan('auto-sync')}    {C.dim('Install hooks that auto-sync on session start / end')}",
         f"  {C.cyan('setup')}        {C.dim('Configure Rclone remote, cloud root folder and groups')}",
@@ -1643,6 +2024,12 @@ def self_check():
                                      f"{C.green('1 new here')}",
                 "Download groups", checked=[0])
     emit(cp.frame(cfg, summary_line(status)))
+    print("\n=== packs ===")
+    packs = {"web": {"skills": ["web-builder", "impeccable"], "group": "work"},
+             "acme": {"skills": ["dataviz"], "extends": ["web"], "group": "work",
+                      "client": "claude", "mode": "copy"}}
+    cfg_packs = dict(cfg, packs=packs, categories=["work", "work/acme", "personal"])
+    emit(header(cfg_packs) + [C.bold("  🧩 Packs"), ""] + pack_rows(cfg_packs, packs))
     print("\n=== help / legend ===")
     emit(help_lines(cfg))
     print("\n=== not configured ===")

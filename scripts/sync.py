@@ -479,6 +479,123 @@ def rpath(cfg, *parts) -> str:
     return base + sep + "/".join(tail)
 
 
+# ---------------------------------------------------------------------- git
+
+# A git repository is not an rclone backend, so it is used the other way round: the remote
+# is a normal local folder that happens to be a clone, and every command pulls before
+# reading it and commits/pushes after writing it. Everything downstream - rclone sync,
+# the manifest, conflicts, .trash - keeps working untouched.
+GIT_CLONE_DIR = "gitremote"
+GIT_IGNORE = ".trash/\n"
+GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+
+
+def git_cfg(cfg):
+    g = (cfg or {}).get("git")
+    return g if isinstance(g, dict) and g.get("url") else None
+
+
+def git_bin(required=True):
+    exe = shutil.which("git")
+    if not exe and required:
+        raise SyncError("git is not installed, or not on PATH")
+    return exe
+
+
+def git_run(clone, args, check=True, timeout=600):
+    env = dict(os.environ, **GIT_ENV)
+    res = subprocess.run([git_bin(), "-C", str(clone)] + list(args),
+                         capture_output=True, text=True, timeout=timeout, env=env,
+                         encoding="utf-8", errors="replace")
+    if check and res.returncode != 0:
+        raise SyncError(f"git {' '.join(args[:2])} failed: "
+                        f"{(res.stderr or res.stdout).strip()[:400]}")
+    return res.returncode, res.stdout or "", res.stderr or ""
+
+
+def git_clone_path(cfg) -> Path:
+    g = git_cfg(cfg)
+    return Path(g["clone"]).expanduser() if g and g.get("clone") else (
+        STATE_DIR / GIT_CLONE_DIR)
+
+
+def ensure_git_clone(cfg) -> Path:
+    """Clone on first use; an empty repository is normal for a brand-new one."""
+    g = git_cfg(cfg)
+    clone = git_clone_path(cfg)
+    if (clone / ".git").exists():
+        return clone
+    branch = g.get("branch") or "main"
+    clone.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, **GIT_ENV)
+    with Spinner(f"cloning {g['url']}"):
+        res = subprocess.run([git_bin(), "clone", "--branch", branch, g["url"], str(clone)],
+                             capture_output=True, text=True, timeout=900, env=env,
+                             encoding="utf-8", errors="replace")
+        if res.returncode != 0:
+            # A repository with no commits yet has no branch to ask for.
+            res = subprocess.run([git_bin(), "clone", g["url"], str(clone)],
+                                 capture_output=True, text=True, timeout=900, env=env,
+                                 encoding="utf-8", errors="replace")
+    if res.returncode != 0:
+        raise SyncError(f"could not clone {g['url']}:\n  "
+                        f"{(res.stderr or res.stdout).strip()[:500]}\n"
+                        f"  If it is asking for credentials, set them up yourself first "
+                        f"(git clone the repo once by hand), then rerun this.")
+    code, out, _e = git_run(clone, ["rev-parse", "--abbrev-ref", "HEAD"], check=False)
+    if code != 0 or out.strip() != branch:
+        git_run(clone, ["checkout", "-B", branch], check=False)
+    gitignore = clone / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(GIT_IGNORE, encoding="utf-8")
+    return clone
+
+
+def git_sync_in(cfg, quiet=False) -> None:
+    """Bring the clone up to date before anything reads the remote."""
+    g = git_cfg(cfg)
+    if not g:
+        return
+    clone = ensure_git_clone(cfg)
+    branch = g.get("branch") or "main"
+    with Spinner("git pull"):
+        code, _out, err = git_run(clone, ["pull", "--ff-only", "origin", branch],
+                                  check=False)
+    if code != 0 and not quiet:
+        detail = err.strip().splitlines()[-1][:160] if err.strip() else ""
+        if "couldn't find remote ref" in err or "no such ref" in err.lower():
+            return                      # empty repo: nothing published yet
+        print(f"note: git pull did not run cleanly ({detail}); using the local clone. "
+              f"Resolve it in {clone} if this repeats.")
+
+
+def git_sync_out(cfg, message: str) -> None:
+    """Commit and push whatever the command just wrote into the clone."""
+    g = git_cfg(cfg)
+    if not g:
+        return
+    clone = git_clone_path(cfg)
+    if not (clone / ".git").exists():
+        return
+    branch = g.get("branch") or "main"
+    git_run(clone, ["add", "-A"], check=False)
+    _c, out, _e = git_run(clone, ["status", "--porcelain"], check=False)
+    if not out.strip():
+        return
+    git_run(clone, ["-c", "user.name=skill-sync", "-c", "user.email=skill-sync@local",
+                    "commit", "-m", f"skill-sync: {message} [{machine_name(cfg)}]"],
+            check=False)
+    with Spinner("git push"):
+        code, _o, err = git_run(clone, ["push", "origin", f"HEAD:{branch}"], check=False)
+    if code != 0:
+        detail = err.strip().splitlines()[-1][:200] if err.strip() else ""
+        print(f"\nwarning: committed locally but the push failed ({detail}).\n"
+              f"  Nothing is lost - fix the credentials and run:\n"
+              f"      git -C {clone} push origin HEAD:{branch}")
+    else:
+        log(f"git push {message}")
+
+
 # ---------------------------------------------------------------- filtering
 
 def skillignore_patterns(skill_dir: Path):
@@ -599,23 +716,23 @@ def save_fp_cache():
 def detect_native_origin(path: Path | str | None) -> tuple[str, str]:
     """Detect the native platform origin of a skill based on its file path."""
     if not path:
-        return ("custom", "👤 [Custom]")
+        return ("custom", "ðŸ‘¤ [Custom]")
     p_str = str(path).replace("\\", "/").lower()
     if "/.claude/plugins/marketplaces/" in p_str:
-        return ("claude-code-plugin", "💬 [Claude Plugin]")
+        return ("claude-code-plugin", "ðŸ’¬ [Claude Plugin]")
     if "/.claude/skills/" in p_str:
-        return ("claude-code", "💬 [Claude Native]")
+        return ("claude-code", "ðŸ’¬ [Claude Native]")
     if "/.gemini/" in p_str:
-        return ("gemini", "🤖 [Gemini Native]")
+        return ("gemini", "ðŸ¤– [Gemini Native]")
     if "/.cursor/" in p_str:
-        return ("cursor", "⚡ [Cursor Native]")
+        return ("cursor", "âš¡ [Cursor Native]")
     if "/.openclaw/" in p_str:
-        return ("openclaw", "🦅 [OpenClaw Native]")
+        return ("openclaw", "ðŸ¦… [OpenClaw Native]")
     if "/.codex/" in p_str:
-        return ("codex", "🧠 [Codex Native]")
+        return ("codex", "ðŸ§  [Codex Native]")
     if "/.agents/" in p_str:
-        return ("agents", "🌐 [Global Agents]")
-    return ("custom", "👤 [Custom]")
+        return ("agents", "ðŸŒ [Global Agents]")
+    return ("custom", "ðŸ‘¤ [Custom]")
 
 
 def is_self(name: str) -> bool:
@@ -710,7 +827,7 @@ def read_manifest(cfg):
     return {"version": 2, "skills": skills}
 
 
-def write_manifest(cfg, entries: dict, drop=()):
+def write_manifest(cfg, entries: dict, drop=(), packs=None):
     """Re-read, merge the changed entries, write the whole index back.
 
     The merge is what keeps a concurrent machine's entry alive: only the skills named in
@@ -722,6 +839,8 @@ def write_manifest(cfg, entries: dict, drop=()):
         for name in drop:
             remote["skills"].pop(name, None)
         remote["skills"].update(entries)
+        if packs is not None:
+            remote["packs"] = packs
         remote["version"] = 2
         remote["updated_at"] = now_iso()
         rclone(["rcat", rpath(cfg, MANIFEST_NAME)],
@@ -922,6 +1041,47 @@ def primary_category(entry, fallback=None):
         return entry["category"]
     cats = entry_categories(entry)
     return cats[0] if cats else fallback
+
+
+CATEGORY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*$")
+MAX_CATEGORY_DEPTH = 4
+
+
+def normalise_category(raw: str) -> str:
+    """Accept a nested group name such as `work/acme`, one folder per segment.
+
+    Each segment is validated on its own because the name is pasted straight into an
+    rclone path: a `..` or a backslash slipping through would write outside the root.
+    """
+    parts = [p.strip() for p in str(raw).replace("\\", "/").split("/") if p.strip()]
+    if not parts:
+        raise SyncError("empty group name")
+    for p in parts:
+        if p in (".", "..") or not CATEGORY_SEGMENT_RE.match(p):
+            raise SyncError(f"invalid group '{raw}': the part '{p}' has to start with a "
+                            f"letter or digit and may only contain letters, digits, "
+                            f"spaces, dots, dashes and underscores")
+    if len(parts) > MAX_CATEGORY_DEPTH:
+        raise SyncError(f"group '{raw}' is {len(parts)} levels deep, the limit is "
+                        f"{MAX_CATEGORY_DEPTH}")
+    return "/".join(parts)
+
+
+def category_matches(member: str, wanted: str) -> bool:
+    """`work` selects `work` and everything nested under it; `work/acme` only itself."""
+    wanted = wanted.rstrip("/")
+    return member == wanted or member.startswith(wanted + "/")
+
+
+def category_tree_lines(by_cat: dict, indent="  ") -> list:
+    """Nested groups printed as a tree instead of a flat list of slash-separated names."""
+    lines = []
+    for cat in sorted(by_cat):
+        depth = cat.count("/")
+        leaf = cat.rsplit("/", 1)[-1]
+        names = sorted(by_cat[cat])
+        lines.append(f"{indent}{'  ' * depth}{leaf} ({len(names)}): {', '.join(names)}")
+    return lines
 
 
 def manifest_entry(cfg, category, fp, size, files, categories=None, native_origin=None):
@@ -1143,10 +1303,34 @@ def cmd_update(args):
 
 # ------------------------------------------------------------------ commands
 
+def repo_slug(url: str) -> str:
+    """`git@host:team/skills.git`, `https://host/team/skills`, `D:\\git\\skills.git` -> `skills`.
+
+    The backslash matters: a Windows path pasted as the repo URL otherwise came out as one
+    enormous slug, and the clone failed on the resulting path length.
+    """
+    tail = re.split(r"[/:\\]", url.strip().rstrip("/\\"))[-1]
+    if tail.endswith(".git"):
+        tail = tail[:-4]
+    return re.sub(r"[^A-Za-z0-9._-]", "-", tail)[:48] or "skills"
+
+
 def cmd_setup(args):
     rclone_bin()
     _c, out, _e = rclone(["listremotes"], check=False, timeout=60)
     remotes = [r.strip() for r in out.splitlines() if r.strip()]
+
+    git_url = getattr(args, "git", None)
+    git_block = None
+    if git_url:
+        git_bin()
+        clone = STATE_DIR / GIT_CLONE_DIR / repo_slug(git_url)
+        git_block = {"url": git_url.strip(),
+                     "branch": (getattr(args, "git_branch", None) or "main").strip(),
+                     "clone": str(clone)}
+        # The clone is an ordinary folder, so it becomes the rclone "remote" and every
+        # existing code path keeps working; git only wraps the reads and writes.
+        args.remote = str(clone)
 
     if not args.remote:
         if not remotes:
@@ -1171,20 +1355,35 @@ def cmd_setup(args):
         if remote.split(":")[0] not in known:
             raise SyncError(f"remote '{remote}' does not exist. Available: {', '.join(remotes)}")
 
-    cats = [c.strip() for c in (args.categories or "personal").split(",") if c.strip()]
+    cats = [normalise_category(c) for c in (args.categories or "personal").split(",")
+            if c.strip()]
+    old = load_config() or {}
     cfg = {
         "remote": remote,
         "root": (args.root if args.root is not None else "ClaudeSkills").strip("/\\"),
         "categories": cats,
         "default_category": args.default_category or cats[0],
         "machine": args.machine or machine_name(),
-        "created_at": now_iso(),
+        "created_at": old.get("created_at") or now_iso(),
     }
+    if git_block:
+        cfg["git"] = git_block
+    # Carry over everything this function does not own - packs, git, extra_skills_dirs,
+    # hook_budget_seconds. The menu calls setup just to add a group, and a plain
+    # overwrite silently deleted every pack the user had defined.
+    for k, v in old.items():
+        cfg.setdefault(k, v)
     save_json(CONFIG_FILE, cfg)
+    if git_cfg(cfg):
+        ensure_git_clone(cfg)
+        git_sync_in(cfg)
     if not STATE_FILE.exists():
         save_json(STATE_FILE, {"skills": {}})
 
     code, _o, err = rclone(["lsf", base_path(cfg), "--max-depth", "1"], check=False, timeout=90)
+    if git_cfg(cfg):
+        print(f"Git repo    : {cfg['git']['url']}  (branch {cfg['git']['branch']})")
+        print(f"Clone       : {cfg['git']['clone']}")
     print(f"Remote      : {base_path(cfg)}")
     print(f"Categories  : {', '.join(cats)}   (default: {cfg['default_category']})")
     print(f"Machine     : {cfg['machine']}")
@@ -1198,6 +1397,7 @@ def cmd_setup(args):
 
 def cmd_status(args):
     cfg = require_config()
+    git_sync_in(cfg, quiet=getattr(args, "json", False))
     st = compute_status(cfg)
 
     if getattr(args, "json", False):
@@ -1250,6 +1450,7 @@ def cmd_status(args):
 
 def cmd_push(args):
     cfg = require_config()
+    git_sync_in(cfg, quiet=getattr(args, "json", False))
     with Lock():
         manifest = read_manifest(cfg)
         st = compute_status(cfg, manifest)
@@ -1396,12 +1597,16 @@ def cmd_push(args):
                       f"{', '.join(deferred[:5])}{' ...' if len(deferred) > 5 else ''}")
         if deferred:
             log(f"push deferred {deferred}")
+        if entries:
+            git_sync_out(cfg, f"push {', '.join(sorted(entries)[:6])}"
+                              f"{' ...' if len(entries) > 6 else ''}")
         purge_backups(cfg)
         return 0
 
 
 def cmd_pull(args):
     cfg = require_config()
+    git_sync_in(cfg)
     with Lock():
         manifest = read_manifest(cfg)
         remote_skills = {n: e for n, e in manifest.get("skills", {}).items() if not is_self(n)}
@@ -1416,9 +1621,10 @@ def cmd_pull(args):
             for n, e in remote_skills.items():
                 for c in entry_categories(e) or [NO_CATEGORY]:
                     by_cat.setdefault(c, []).append(n)
-            for cat in sorted(by_cat):
-                print(f"  {cat} ({len(by_cat[cat])}): {', '.join(sorted(by_cat[cat]))}")
+            for line in category_tree_lines(by_cat):
+                print(line)
             print("\nPull what you want on this machine:")
+            print("    (a parent group brings down everything nested under it)")
             print("    python sync.py pull <category> [<category>...]")
             print("    python sync.py pull --skills <skill> [...]")
             return 2
@@ -1441,15 +1647,16 @@ def cmd_pull(args):
                 wanted.append(n)
         for n, e in remote_skills.items():
             member_of = set(entry_categories(e)) or {NO_CATEGORY}
-            if args.categories and member_of & set(args.categories) and n not in wanted:
+            if args.categories and n not in wanted and any(
+                    category_matches(m, c) for m in member_of for c in args.categories):
                 wanted.append(n)
         if args.categories:
             known = set()
             for e in remote_skills.values():
                 known |= set(entry_categories(e)) or {NO_CATEGORY}
-            unknown = set(args.categories) - known
-            for c in sorted(unknown):
-                print(f"note: no category named '{c}' on the remote")
+            for c in args.categories:
+                if not any(category_matches(m, c) for m in known):
+                    print(f"note: no category named '{c}' on the remote")
 
         pulled, conflicts, skipped_in_sync = [], [], []
         total_wanted = len(wanted)
@@ -1536,13 +1743,17 @@ def cmd_pull(args):
 def cmd_categorize(args):
     """Set, add to, or remove from a skill's groups.
 
+    (The git-backed remote is pulled first so the manifest being edited is the current
+    one, and pushed again at the end.)
+
     Groups are membership, not a location: adding `work` to a skill that is already in
     `personal` leaves it in both. Only the primary group - the first one - decides which
     folder physically holds the skill on the remote, so a plain add never moves data.
     """
     cfg = require_config()
+    git_sync_in(cfg)
     name = args.skill
-    asked = [c.strip() for c in args.categories if c and c.strip()]
+    asked = [normalise_category(c) for c in args.categories if c and c.strip()]
     if not asked:
         raise SyncError("give at least one group name")
     if name not in local_skills_map(cfg) and not args.force:
@@ -1599,7 +1810,9 @@ def cmd_categorize(args):
     else:
         print(f"{name} -> groups: {', '.join(new_cats)}"
               + (f"   (stored under {new_primary}/)" if len(new_cats) > 1 else ""))
-    if not entry:
+    if entry:
+        git_sync_out(cfg, f"categorize {name} -> {', '.join(new_cats)}")
+    else:
         print(f"not uploaded yet: python sync.py push {name}")
     return 0
 
@@ -1614,6 +1827,55 @@ CLIENT_DIRS = {
     "antigravity": HOME / ".agents" / "skills",
     "opencode": HOME / ".agents" / "skills",
 }
+
+
+def place_one(src: Path, dest_root: Path, name: str, force=False, symlink=False,
+              label="", quiet=False):
+    """Copy or junction one skill folder into `dest_root`, backing up what it replaces.
+
+    Returns (result, destination) where result is "placed", "same" or "exists".
+    """
+    dst = dest_root / name
+    is_link = dst.is_symlink() or (os.name == "nt" and os.path.islink(dst))
+    if dst.exists() and dst.resolve() == src.resolve():
+        if not quiet:
+            print(f"skip {label}: {name} is already there")
+        return "same", dst
+    dest_root.mkdir(parents=True, exist_ok=True)
+    if dst.exists() or is_link:
+        if not force:
+            if not quiet:
+                print(f"skip {label}: {name} already exists there (use --force to overwrite)")
+            return "exists", dst
+        backup = TRASH_DIR / stamp() / (label or "placed") / name
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        if is_link or dst.is_file():
+            try:
+                dst.unlink()
+            except OSError:
+                if os.name == "nt" and dst.is_dir():
+                    os.rmdir(dst)
+        elif dst.is_dir():
+            shutil.move(str(dst), str(backup))
+
+    if symlink:
+        if os.name == "nt":
+            res = subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if res.returncode != 0:
+                try:
+                    os.symlink(src, dst, target_is_directory=True)
+                except Exception as err:
+                    raise SyncError(f"failed to create junction/symlink on Windows: {err}")
+        else:
+            os.symlink(src, dst, target_is_directory=True)
+        if not quiet:
+            print(f"placed (symlink) {name} -> {label} ({dst})")
+    else:
+        shutil.copytree(src, dst)
+        if not quiet:
+            print(f"placed {name} -> {label} ({dst})")
+    return "placed", dst
 
 
 def cmd_place(args):
@@ -1640,44 +1902,10 @@ def cmd_place(args):
     placed = []
     use_symlink = getattr(args, "symlink", False)
     for label, dest_root in targets:
-        dst = dest_root / name
-        is_link = dst.is_symlink() or (os.name == "nt" and os.path.islink(dst))
-        if dst.resolve() == src.resolve():
-            print(f"skip {label}: {name} is already there")
-            continue
-        dest_root.mkdir(parents=True, exist_ok=True)
-        if dst.exists() or is_link:
-            if not args.force:
-                print(f"skip {label}: {name} already exists there (use --force to overwrite)")
-                continue
-            backup = TRASH_DIR / stamp() / label / name
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            if is_link or dst.is_file():
-                try:
-                    dst.unlink()
-                except OSError:
-                    if os.name == "nt" and dst.is_dir():
-                        os.rmdir(dst)
-            elif dst.is_dir():
-                shutil.move(str(dst), str(backup))
-
-        if use_symlink:
-            if os.name == "nt":
-                res = subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                if res.returncode != 0:
-                    try:
-                        os.symlink(src, dst, target_is_directory=True)
-                    except Exception as err:
-                        raise SyncError(f"failed to create junction/symlink on Windows: {err}")
-            else:
-                os.symlink(src, dst, target_is_directory=True)
+        result, dst = place_one(src, dest_root, name, force=args.force,
+                               symlink=use_symlink, label=label)
+        if result == "placed":
             placed.append((label, dst))
-            print(f"placed (symlink) {name} -> {label} ({dst})")
-        else:
-            shutil.copytree(src, dst)
-            placed.append((label, dst))
-            print(f"placed {name} -> {label} ({dst})")
 
     if placed:
         print("Restart the target client(s) so they discover the skill.")
@@ -1685,8 +1913,602 @@ def cmd_place(args):
     return 0 if placed or not targets else 1
 
 
+# --------------------------------------------------------------------- packs
+
+PACK_LOCKFILE = ".skill-pack.json"
+PACK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+DEFAULT_PACK_CLIENT = "claude"
+
+# Where a client keeps skills *inside a project*, as opposed to CLIENT_DIRS which is the
+# machine-wide folder. Cursor, Antigravity and OpenCode share `.agents/skills` here too.
+CLIENT_PROJECT_DIRS = {
+    "claude": Path(".claude") / "skills",
+    "gemini": Path(".gemini") / "skills",
+    "agents": Path(".agents") / "skills",
+    "cursor": Path(".agents") / "skills",
+    "antigravity": Path(".agents") / "skills",
+    "opencode": Path(".agents") / "skills",
+}
+
+
+def load_packs(cfg) -> dict:
+    packs = cfg.get("packs")
+    return packs if isinstance(packs, dict) else {}
+
+
+def save_packs(cfg, packs: dict) -> None:
+    cfg["packs"] = packs
+    save_json(CONFIG_FILE, cfg)
+
+
+def valid_pack_name(raw: str) -> str:
+    name = str(raw).strip()
+    if not PACK_NAME_RE.match(name):
+        raise SyncError(f"invalid pack name '{raw}': letters, digits, dot, dash and "
+                        f"underscore only - a pack is a label, not a path")
+    return name
+
+
+def require_pack(packs, name):
+    if name not in packs:
+        known = ", ".join(sorted(packs)) or "none defined yet"
+        raise SyncError(f"no pack called '{name}' (known: {known})")
+    return packs[name]
+
+
+def resolve_pack(packs, name, _chain=()) -> list:
+    """Every skill in a pack, parents first, deduplicated, order preserved."""
+    if name in _chain:
+        raise SyncError("these packs extend each other in a circle: "
+                        + " -> ".join(list(_chain) + [name]))
+    pack = require_pack(packs, name)
+    out = []
+    for parent in pack.get("extends") or []:
+        for s in resolve_pack(packs, parent, tuple(_chain) + (name,)):
+            if s not in out:
+                out.append(s)
+    for s in pack.get("skills") or []:
+        if s not in out:
+            out.append(s)
+    return [s for s in out if not is_self(s)]
+
+
+def pack_dest(client, project=None) -> Path:
+    """The folder a pack is deployed into: project root x client, or the client's own."""
+    key = (client or DEFAULT_PACK_CLIENT).lower()
+    if project:
+        rel = CLIENT_PROJECT_DIRS.get(key)
+        if rel is None:
+            raise SyncError(f"unknown client '{client}' - known: "
+                            f"{', '.join(sorted(CLIENT_PROJECT_DIRS))}")
+        return (Path(project).expanduser().resolve() / rel)
+    root = CLIENT_DIRS.get(key)
+    if root is None:
+        raise SyncError(f"unknown client '{client}' - known: "
+                        f"{', '.join(sorted(set(CLIENT_DIRS)))}")
+    return root
+
+
+def scan_project_skills(project) -> list:
+    """Skill names already sitting in a project, whichever client's folder holds them."""
+    root = Path(project).expanduser().resolve()
+    if not root.exists():
+        raise SyncError(f"{root} does not exist")
+    found, seen_dirs = [], set()
+    candidates = [root / rel for rel in CLIENT_PROJECT_DIRS.values()] + [root]
+    for d in candidates:
+        if d in seen_dirs or not d.is_dir():
+            continue
+        seen_dirs.add(d)
+        for child in sorted(d.iterdir()):
+            if child.is_dir() and (child / "SKILL.md").exists() and child.name not in found:
+                found.append(child.name)
+    return [n for n in found if not is_self(n)]
+
+
+def warn_if_scanned(dest: Path, cfg=None) -> None:
+    """`.agents/skills` under the working directory is one of the folders push scans.
+
+    A pack applied there looks like a pile of brand-new skills to `confirm-new`, which
+    would then offer to upload second copies of skills that are already on the remote.
+    """
+    try:
+        target = dest.resolve()
+    except OSError:
+        return
+    for d in get_all_skill_dirs(cfg):
+        try:
+            if d.exists() and target == d.resolve():
+                print(f"\nnote: {target} is a folder skill-sync scans for skills. If "
+                      f"confirm-new offers to upload these copies, answer n.")
+                return
+        except OSError:
+            continue
+
+
+def read_lockfile(dest: Path) -> dict:
+    data = load_json(dest / PACK_LOCKFILE, {}) or {}
+    if not isinstance(data.get("packs"), dict):
+        data["packs"] = {}
+    return data
+
+
+def write_lockfile(dest: Path, data: dict) -> None:
+    if data["packs"]:
+        dest.mkdir(parents=True, exist_ok=True)
+        save_json(dest / PACK_LOCKFILE, data)
+    else:
+        try:
+            (dest / PACK_LOCKFILE).unlink()
+        except OSError:
+            pass
+
+
+def _pack_summary(packs, name, lmap) -> str:
+    try:
+        skills = resolve_pack(packs, name)
+    except SyncError as e:
+        return f"  {name:<18} {str(e)[:60]}"
+    pack = packs[name]
+    missing = [s for s in skills if s not in lmap]
+    bits = [f"{len(skills)} skills"]
+    if pack.get("extends"):
+        bits.append("extends " + ", ".join(pack["extends"]))
+    if missing:
+        bits.append(f"{len(missing)} not on this machine")
+    return f"  {name:<18} {'   '.join(bits)}"
+
+
+def _pack_list(args, cfg, packs):
+    if not packs:
+        print("No packs defined yet. A pack is a named list of skills you deploy into a "
+              "project or a client:\n")
+        print("    python sync.py pack create web --skills web-builder impeccable dataviz")
+        print("    python sync.py pack create acme --extends web --from-project C:\\dev\\acme")
+        print("    python sync.py pack apply web --project C:\\dev\\newsite")
+        return 2
+    lmap = local_skills_map(cfg)
+    by_group = {}
+    for name, p in packs.items():
+        by_group.setdefault(p.get("group") or "", []).append(name)
+    for group in sorted(by_group):
+        print(f"\n{group}/" if group else "")
+        for name in sorted(by_group[group]):
+            print(_pack_summary(packs, name, lmap))
+    print("\n    python sync.py pack show <pack>")
+    print("    python sync.py pack apply <pack> --project <folder> [--client claude]")
+    return 0
+
+
+def _pack_show(args, cfg, packs):
+    name = args.name
+    pack = require_pack(packs, name)
+    skills = resolve_pack(packs, name)
+    lmap = local_skills_map(cfg)
+    own = set(pack.get("skills") or [])
+    print(f"pack        {name}")
+    if pack.get("group"):
+        print(f"group       {pack['group']}")
+    if pack.get("extends"):
+        print(f"extends     {', '.join(pack['extends'])}")
+    print(f"client      {pack.get('client') or DEFAULT_PACK_CLIENT}"
+          f"   mode {pack.get('mode') or 'copy'}")
+    print(f"skills      {len(skills)}\n")
+    for s in skills:
+        where = "here" if s in lmap else "missing locally"
+        origin = "" if s in own else " (inherited)"
+        print(f"  {s:<28} {where}{origin}")
+    missing = [s for s in skills if s not in lmap]
+    if missing:
+        print(f"\n{len(missing)} skill(s) are not on this machine; `pack apply` downloads "
+              f"them from the remote.")
+    return 0
+
+
+def _pack_create(args, cfg, packs):
+    name = valid_pack_name(args.name)
+    if name in packs and not args.force:
+        raise SyncError(f"pack '{name}' already exists - use `pack add {name} <skill>` to "
+                        f"extend it, or --force to redefine it from scratch")
+    extends = [valid_pack_name(e) for e in (args.extends or [])]
+    for parent in extends:
+        require_pack(packs, parent)
+    skills = [s for s in dict.fromkeys(args.skills or []) if not is_self(s)]
+    if args.from_project:
+        for s in scan_project_skills(args.from_project):
+            if s not in skills:
+                skills.append(s)
+    if not skills and not extends:
+        raise SyncError("a pack needs at least one skill, or an --extends parent")
+    packs[name] = {
+        "skills": skills,
+        "extends": extends,
+        "group": args.group,
+        "client": (args.client or DEFAULT_PACK_CLIENT).lower(),
+        "mode": "link" if args.link else "copy",
+        "updated_at": now_iso(),
+        "machine": cfg.get("machine"),
+    }
+    # A cycle only becomes visible once the pack is in the dict.
+    try:
+        resolved = resolve_pack(packs, name)
+    except SyncError:
+        packs.pop(name, None)
+        raise
+    save_packs(cfg, packs)
+    lmap = local_skills_map(cfg)
+    unknown = [s for s in resolved if s not in lmap]
+    print(f"pack '{name}': {len(resolved)} skill(s)")
+    for s in resolved:
+        print(f"  {s}{'' if s in lmap else '   (not on this machine)'}")
+    if unknown:
+        print(f"\n{len(unknown)} of them will be downloaded from the remote on apply.")
+    print(f"\n    python sync.py pack apply {name} --project <folder>")
+    return 0
+
+
+def _pack_edit(args, cfg, packs, adding: bool):
+    name = args.name
+    pack = require_pack(packs, name)
+    asked = [s for s in dict.fromkeys(args.skills) if s.strip()]
+    if not asked:
+        raise SyncError("name at least one skill")
+    current = list(pack.get("skills") or [])
+    if adding:
+        new = current + [s for s in asked if s not in current and not is_self(s)]
+    else:
+        new = [s for s in current if s not in asked]
+        inherited = [s for s in asked if s in resolve_pack(packs, name) and s not in current]
+        for s in inherited:
+            print(f"note: {s} comes from a parent pack - remove it there, or from "
+                  f"{name}'s --extends")
+    if new == current:
+        print(f"{name} is unchanged: {', '.join(current) or '(empty)'}")
+        return 0
+    if not new and not pack.get("extends"):
+        raise SyncError(f"that would leave '{name}' empty; delete the pack instead")
+    pack["skills"] = new
+    pack["updated_at"] = now_iso()
+    save_packs(cfg, packs)
+    print(f"{name} -> {len(resolve_pack(packs, name))} skill(s): "
+          f"{', '.join(resolve_pack(packs, name))}")
+    return 0
+
+
+def _pack_delete(args, cfg, packs):
+    name = args.name
+    require_pack(packs, name)
+    children = [n for n, p in packs.items() if name in (p.get("extends") or [])]
+    if children and not args.force:
+        raise SyncError(f"'{name}' is extended by {', '.join(children)}; delete those "
+                        f"first or pass --force to drop the inheritance")
+    packs.pop(name, None)
+    for child in children:
+        packs[child]["extends"] = [e for e in packs[child]["extends"] if e != name]
+    save_packs(cfg, packs)
+    print(f"deleted pack '{name}'"
+          + (f" and unhooked it from {', '.join(children)}" if children else ""))
+    print("Anything already deployed into a project stays where it is "
+          "(`pack remove` uninstalls that).")
+    return 0
+
+
+def _pack_target(args, packs, name):
+    """(destination, client, project, link?) for the apply/move/remove family."""
+    pack = packs.get(name) or {}
+    project = str(Path.cwd()) if getattr(args, "here", False) else args.project
+    client = (getattr(args, "client", None) or pack.get("client")
+              or DEFAULT_PACK_CLIENT).lower()
+    if getattr(args, "link", False):
+        link = True
+    elif getattr(args, "copy", False):
+        link = False
+    else:
+        link = pack.get("mode") == "link"
+    return pack_dest(client, project), client, project, link
+
+
+def _pack_apply(args, cfg, packs):
+    name = args.name
+    require_pack(packs, name)
+    skills = resolve_pack(packs, name)
+    dest, client, project, link = _pack_target(args, packs, name)
+    lmap = local_skills_map(cfg)
+    missing_local = [s for s in skills if s not in lmap]
+
+    manifest = None
+    if missing_local and not args.no_pull:
+        try:
+            manifest = read_manifest(cfg)
+        except SyncError as e:
+            print(f"note: could not read the remote index ({e}); missing skills are skipped")
+
+    print(f"pack '{name}' -> {dest}")
+    print(f"  client {client}   mode {'symlink' if link else 'copy'}   "
+          f"{len(skills)} skill(s)"
+          + (f"   project {project}" if project else "   (machine-wide)"))
+    if args.dry_run:
+        for s in skills:
+            src = "local" if s in lmap else ("remote" if manifest and s in
+                                             manifest.get("skills", {}) else "NOT FOUND")
+            print(f"  (dry-run) {s:<28} from {src}")
+        return 0
+
+    placed, skipped, downloaded, not_found = [], [], [], []
+    for s in skills:
+        src = lmap.get(s)
+        if src:
+            result, _dst = place_one(src, dest, s, force=args.force, symlink=link,
+                                    label=client)
+            (placed if result == "placed" else skipped).append(s)
+            continue
+        entry = (manifest or {}).get("skills", {}).get(s)
+        if not entry:
+            not_found.append(s)
+            continue
+        if (dest / s).exists() and not args.force:
+            print(f"skip {client}: {s} already exists there (use --force to overwrite)")
+            skipped.append(s)
+            continue
+        try:
+            pull_skill(cfg, s, primary_category(entry, NO_CATEGORY), dest)
+            downloaded.append(s)
+            placed.append(s)
+        except SyncError as e:
+            print(f"skipped {s}: {e}")
+            not_found.append(s)
+
+    lock = read_lockfile(dest)
+    lock["packs"][name] = {
+        "skills": skills,
+        "mode": "link" if link else "copy",
+        "client": client,
+        "applied_at": now_iso(),
+        "machine": cfg.get("machine"),
+    }
+    write_lockfile(dest, lock)
+
+    print(f"\n{len(placed)} placed"
+          + (f" ({len(downloaded)} downloaded from the remote)" if downloaded else "")
+          + (f", {len(skipped)} already there" if skipped else ""))
+    if not_found:
+        print(f"not found anywhere: {', '.join(not_found)}")
+    if placed:
+        print(f"Restart {client} so it discovers them.")
+    warn_if_scanned(dest, cfg)
+    log(f"pack apply {name} -> {dest}")
+    return 0 if not not_found else 1
+
+
+def _pack_move(args, cfg, packs):
+    name = args.name
+    require_pack(packs, name)
+    skills = resolve_pack(packs, name)
+    project = str(Path.cwd()) if getattr(args, "here", False) else args.project
+    src_root = pack_dest(args.from_client, project)
+    dst_root = pack_dest(args.to_client, project)
+    if src_root.resolve() == dst_root.resolve():
+        raise SyncError(f"'{args.from_client}' and '{args.to_client}' are the same folder "
+                        f"({src_root}) - nothing to move")
+    print(f"pack '{name}': {src_root}  ->  {dst_root}")
+    if args.dry_run:
+        for s in skills:
+            print(f"  (dry-run) {s:<28} "
+                  f"{'move' if (src_root / s).exists() else 'not in the source folder'}")
+        return 0
+
+    lmap = local_skills_map(cfg)
+    moved, skipped, absent = [], [], []
+    for s in skills:
+        src = src_root / s
+        if not src.exists():
+            fallback = lmap.get(s)
+            if fallback and not (dst_root / s).exists():
+                result, _d = place_one(fallback, dst_root, s, force=args.force,
+                                      symlink=False, label=args.to_client)
+                (moved if result == "placed" else skipped).append(s)
+            else:
+                absent.append(s)
+            continue
+        result, _dst = place_one(src, dst_root, s, force=args.force, symlink=False,
+                                label=args.to_client)
+        if result != "placed":
+            skipped.append(s)
+            continue
+        backup = TRASH_DIR / stamp() / args.from_client / s
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if src.is_symlink() or (os.name == "nt" and os.path.islink(src)):
+                src.unlink()
+            else:
+                shutil.move(str(src), str(backup))
+        except OSError as e:
+            print(f"warning: copied {s} but could not remove {src}: {e}")
+        moved.append(s)
+
+    src_lock = read_lockfile(src_root)
+    entry = src_lock["packs"].pop(name, None)
+    write_lockfile(src_root, src_lock)
+    dst_lock = read_lockfile(dst_root)
+    dst_lock["packs"][name] = {
+        "skills": skills, "mode": "copy", "client": args.to_client,
+        "applied_at": now_iso(), "machine": cfg.get("machine"),
+        "moved_from": args.from_client,
+    }
+    write_lockfile(dst_root, dst_lock)
+    if entry is None:
+        print(f"note: no lockfile entry for '{name}' in the source folder")
+
+    print(f"\n{len(moved)} moved"
+          + (f", {len(skipped)} left alone" if skipped else "")
+          + (f", {len(absent)} were not there: {', '.join(absent)}" if absent else ""))
+    print(f"Replaced/removed copies are recoverable under {TRASH_DIR}")
+    if moved:
+        print(f"Restart {args.to_client}.")
+    log(f"pack move {name} {args.from_client} -> {args.to_client}")
+    return 0
+
+
+def _pack_remove(args, cfg, packs):
+    name = args.name
+    dest, client, project, _link = _pack_target(args, packs, name)
+    lock = read_lockfile(dest)
+    entry = lock["packs"].get(name)
+    if entry:
+        skills = list(entry.get("skills") or [])
+    elif name in packs:
+        skills = resolve_pack(packs, name)
+        print(f"note: no lockfile entry in {dest}; using the pack's current definition")
+    else:
+        raise SyncError(f"'{name}' is neither deployed in {dest} nor a known pack")
+
+    # Anything another still-applied pack needs stays put.
+    keep = set()
+    for other, oe in lock["packs"].items():
+        if other != name:
+            keep |= set(oe.get("skills") or [])
+    removed, kept = [], []
+    for s in skills:
+        target = dest / s
+        is_link = target.is_symlink() or (os.name == "nt" and os.path.islink(target))
+        if not target.exists() and not is_link:
+            continue
+        if s in keep:
+            kept.append(s)
+            continue
+        if args.dry_run:
+            removed.append(s)
+            continue
+        backup = TRASH_DIR / stamp() / f"{name}-{client}" / s
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if is_link:
+                target.unlink()
+            else:
+                shutil.move(str(target), str(backup))
+            removed.append(s)
+        except OSError as e:
+            print(f"could not remove {target}: {e}")
+    if args.dry_run:
+        print(f"(dry-run) would remove {len(removed)} skill(s) from {dest}: "
+              f"{', '.join(removed)}")
+        return 0
+    lock["packs"].pop(name, None)
+    write_lockfile(dest, lock)
+    print(f"removed {len(removed)} skill(s) from {dest}")
+    if kept:
+        print(f"kept (another applied pack needs them): {', '.join(kept)}")
+    print(f"Backed up under {TRASH_DIR}")
+    log(f"pack remove {name} from {dest}")
+    return 0
+
+
+def _pack_where(args, cfg, packs):
+    project = args.project or str(Path.cwd())
+    roots, seen = [], set()
+    for client in sorted(CLIENT_PROJECT_DIRS):
+        d = pack_dest(client, project)
+        if d not in seen:
+            seen.add(d)
+            roots.append((client, d))
+    found = False
+    print(f"project {Path(project).expanduser().resolve()}\n")
+    for client, d in roots:
+        lock = read_lockfile(d)
+        if not lock["packs"]:
+            continue
+        found = True
+        print(f"  {d}")
+        for pname, e in sorted(lock["packs"].items()):
+            drift = ""
+            if pname in packs:
+                now = set(resolve_pack(packs, pname))
+                then = set(e.get("skills") or [])
+                if now - then:
+                    drift = f"   {len(now - then)} added to the pack since - `pack apply`"
+            print(f"    {pname:<16} {len(e.get('skills') or [])} skills   "
+                  f"{e.get('mode')}   {str(e.get('applied_at'))[:10]}{drift}")
+    if not found:
+        print("  no pack has been applied here")
+        return 2
+    return 0
+
+
+def _pack_publish(args, cfg, packs):
+    if not packs:
+        raise SyncError("no packs to publish")
+    git_sync_in(cfg)
+    with Lock():
+        remote = read_manifest(cfg)
+        merged = dict(remote.get("packs") or {})
+        merged.update(packs)
+        write_manifest(cfg, {}, packs=merged)
+    git_sync_out(cfg, f"packs {', '.join(sorted(packs))}")
+    print(f"published {len(packs)} pack(s) to {base_path(cfg)}: {', '.join(sorted(packs))}")
+    return 0
+
+
+def _pack_fetch(args, cfg, packs):
+    git_sync_in(cfg)
+    with Lock():
+        remote = read_manifest(cfg)
+    incoming = remote.get("packs") or {}
+    if not incoming:
+        print(f"{base_path(cfg)} has no packs yet - run `pack publish` on the machine "
+              f"that defines them")
+        return 2
+    added, updated, kept = [], [], []
+    for name, p in incoming.items():
+        if name not in packs:
+            packs[name] = p
+            added.append(name)
+        elif packs[name] == p:
+            continue
+        elif args.keep_local:
+            kept.append(name)
+        else:
+            packs[name] = p
+            updated.append(name)
+    save_packs(cfg, packs)
+    print(f"{len(added)} new, {len(updated)} updated"
+          + (f", {len(kept)} local kept" if kept else ""))
+    for label, names in (("new", added), ("updated", updated), ("kept local", kept)):
+        if names:
+            print(f"  {label}: {', '.join(sorted(names))}")
+    return 0
+
+
+PACK_ACTIONS = {
+    "list": _pack_list,
+    "show": _pack_show,
+    "create": _pack_create,
+    "add": lambda a, c, p: _pack_edit(a, c, p, adding=True),
+    "rm": lambda a, c, p: _pack_edit(a, c, p, adding=False),
+    "delete": _pack_delete,
+    "apply": _pack_apply,
+    "move": _pack_move,
+    "remove": _pack_remove,
+    "where": _pack_where,
+    "publish": _pack_publish,
+    "fetch": _pack_fetch,
+}
+
+
+def cmd_pack(args):
+    action = getattr(args, "pack_action", None)
+    if not action:
+        parser = getattr(args, "_pack_parser", None)
+        if parser:
+            parser.print_help()
+        return 2
+    cfg = require_config()
+    packs = load_packs(cfg)
+    return PACK_ACTIONS[action](args, cfg, packs)
+
+
 def cmd_resolve(args):
     cfg = require_config()
+    git_sync_in(cfg)
     name = args.skill
     with Lock():
         manifest = read_manifest(cfg)
@@ -1710,6 +2532,7 @@ def cmd_resolve(args):
             write_manifest(cfg, {name: manifest_entry(cfg, category, fp, size, files,
                                                       categories=categories)})
             record_synced(name, category, fp, mtime, files)
+            git_sync_out(cfg, f"resolve {name} (keep local)")
             print(f"resolved: LOCAL version of {name} is now on the remote")
         else:
             dest_root = skill_dest_dir(name, cfg)
@@ -1730,6 +2553,7 @@ def cmd_resolve(args):
 
 def cmd_prune(args):
     cfg = require_config()
+    git_sync_in(cfg)
     with Lock():
         manifest = read_manifest(cfg)
         local = set(local_skills())
@@ -1767,6 +2591,7 @@ def cmd_prune(args):
         save_json(STATE_FILE, st)
         print(f"Removed {len(targets)} skill(s) from the remote.")
         log(f"prune {targets}")
+        git_sync_out(cfg, f"prune {', '.join(sorted(targets)[:6])}")
         return 0
 
 
@@ -1814,6 +2639,28 @@ def cmd_doctor(args):
         print(f"config         : {CONFIG_FILE}")
         print(f"remote         : {base_path(cfg)}")
         print(f"categories     : {', '.join(cfg.get('categories', [])) or '(none)'}")
+        packs = load_packs(cfg)
+        if packs:
+            print(f"packs          : {', '.join(sorted(packs))}")
+        g = git_cfg(cfg)
+        if g:
+            clone = git_clone_path(cfg)
+            gexe = git_bin(required=False)
+            print(f"git repo       : {g['url']}  (branch {g.get('branch')})")
+            if not gexe:
+                ok = False
+                print("git            : NOT FOUND  -> install git and put it on PATH")
+            elif not (clone / ".git").exists():
+                print(f"git clone      : {clone}  (not cloned yet, happens on first use)")
+            else:
+                _c, out, _e = git_run(clone, ["status", "--porcelain"], check=False)
+                _c2, ahead, _e2 = git_run(
+                    clone, ["rev-list", "--count", f"origin/{g.get('branch')}..HEAD"],
+                    check=False)
+                dirty = len([l for l in out.splitlines() if l.strip()])
+                print(f"git clone      : {clone}")
+                print(f"git state      : {dirty} uncommitted change(s), "
+                      f"{(ahead or '0').strip() or '0'} commit(s) not pushed")
         if exe:
             code, _o, err = rclone(["lsf", base_path(cfg), "--max-depth", "1"],
                                    check=False, timeout=90)
@@ -2083,7 +2930,7 @@ def cmd_confirm_new(args):
             ans = input("  Subir esta skill? [s/N]: ").strip().lower()
         except EOFError:
             ans = ""
-        if ans in ("s", "si", "sí", "y", "yes"):
+        if ans in ("s", "si", "sÃ­", "y", "yes"):
             to_push.append(name)
         print()
 
@@ -2115,6 +2962,7 @@ def cmd_hook_session_start(args):
     if not args.force and time.time() - float(st.get("last_remote_check") or 0) < REMOTE_CHECK_INTERVAL:
         return 0
     try:
+        git_sync_in(cfg, quiet=True)
         manifest = read_manifest(cfg)
     except Exception as e:
         log(f"hook-session-start skipped: {e!r}")
@@ -2215,6 +3063,10 @@ def build_parser():
 
     s = sub.add_parser("setup", help="configure remote, root folder and categories")
     s.add_argument("--remote", help="rclone remote, e.g. gdrive: or dropbox:, or a local path")
+    s.add_argument("--git", help="git repository URL to keep the skills in, instead of a "
+                                "cloud remote (it is cloned locally and pushed for you)")
+    s.add_argument("--git-branch", dest="git_branch", default=None,
+                   help="branch to use with --git (default: main)")
     s.add_argument("--root", default="ClaudeSkills", help="folder inside the remote")
     s.add_argument("--categories", help="comma separated, e.g. work,school,personal")
     s.add_argument("--default-category", dest="default_category")
@@ -2265,6 +3117,81 @@ def build_parser():
     s.add_argument("--force", action="store_true", help="overwrite an existing copy at the destination")
     s.add_argument("--symlink", action="store_true", help="create a directory junction / symlink instead of copying files")
     s.set_defaults(func=cmd_place)
+
+    s = sub.add_parser("pack", help="bundle skills and deploy them into a project or client")
+    s.set_defaults(func=cmd_pack, _pack_parser=s)
+    psub = s.add_subparsers(dest="pack_action", metavar="<action>")
+
+    def _dest_flags(target, allow_link=True):
+        target.add_argument("--project", help="deploy inside this project folder")
+        target.add_argument("--here", action="store_true",
+                            help="deploy in the current folder")
+        target.add_argument("--client", help="claude (default), gemini, agents, cursor, "
+                                             "antigravity, opencode")
+        if allow_link:
+            target.add_argument("--link", action="store_true",
+                                help="junction/symlink to the master copy, not a copy")
+            target.add_argument("--copy", action="store_true",
+                                help="copy files (the default)")
+
+    psub.add_parser("list", help="every pack and how many skills it carries")
+
+    pp = psub.add_parser("show", help="the skills a pack resolves to")
+    pp.add_argument("name")
+
+    pp = psub.add_parser("create", help="define a new pack")
+    pp.add_argument("name")
+    pp.add_argument("--skills", nargs="+", default=[], help="skill names to include")
+    pp.add_argument("--extends", nargs="+", default=[], help="packs to inherit from")
+    pp.add_argument("--from-project", dest="from_project",
+                   help="seed it with the skills already in this project")
+    pp.add_argument("--group", help="label for grouping packs in `pack list`")
+    pp.add_argument("--client", help="default client for this pack")
+    pp.add_argument("--link", action="store_true", help="default to symlinks, not copies")
+    pp.add_argument("--force", action="store_true", help="redefine an existing pack")
+
+    pp = psub.add_parser("add", help="add skills to a pack")
+    pp.add_argument("name")
+    pp.add_argument("skills", nargs="+")
+
+    pp = psub.add_parser("rm", help="take skills out of a pack")
+    pp.add_argument("name")
+    pp.add_argument("skills", nargs="+")
+
+    pp = psub.add_parser("delete", help="delete a pack definition")
+    pp.add_argument("name")
+    pp.add_argument("--force", action="store_true", help="also unhook packs that extend it")
+
+    pp = psub.add_parser("apply", help="deploy a pack into a project or a client")
+    pp.add_argument("name")
+    _dest_flags(pp)
+    pp.add_argument("--force", action="store_true", help="overwrite what is already there")
+    pp.add_argument("--no-pull", dest="no_pull", action="store_true",
+                   help="do not download skills that are missing on this machine")
+    pp.add_argument("--dry-run", dest="dry_run", action="store_true")
+
+    pp = psub.add_parser("move", help="move a deployed pack from one client to another")
+    pp.add_argument("name")
+    pp.add_argument("--from", dest="from_client", required=True)
+    pp.add_argument("--to", dest="to_client", required=True)
+    pp.add_argument("--project")
+    pp.add_argument("--here", action="store_true")
+    pp.add_argument("--force", action="store_true")
+    pp.add_argument("--dry-run", dest="dry_run", action="store_true")
+
+    pp = psub.add_parser("remove", help="uninstall a deployed pack from a folder")
+    pp.add_argument("name")
+    _dest_flags(pp, allow_link=False)
+    pp.add_argument("--dry-run", dest="dry_run", action="store_true")
+
+    pp = psub.add_parser("where", help="which packs are deployed in a project")
+    pp.add_argument("--project")
+
+    psub.add_parser("publish", help="upload the pack definitions to the remote")
+
+    pp = psub.add_parser("fetch", help="bring pack definitions down from the remote")
+    pp.add_argument("--keep-local", dest="keep_local", action="store_true",
+                   help="do not overwrite a pack that already exists here")
 
     s = sub.add_parser("resolve", help="resolve a conflict, keeping one side")
     s.add_argument("skill")

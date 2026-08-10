@@ -45,11 +45,13 @@ below instead. Everything the menu does is available as one.
 | Command | Purpose |
 |---|---|
 | `setup --remote <remote:> --categories work,school,personal` | one-time configuration on each computer |
+| `setup --git <url> [--git-branch main]` | use a git repository instead of a cloud remote |
+| `pack <action>` | bundles of skills deployed into one project or one client (see "Packs") |
 | `status` | what is local-only, remote-only, newer, or conflicting |
 | `push [skill...]` | upload changed skills (`--dry-run`, `--force`, `--no-scan`, `--budget <seconds>`, `--threads <N>`) |
 | `pull [category...]` | download; bare `pull` lists what the remote has (`--skills`, `--dest`, `--force`, `--threads <N>`) |
 | `confirm-new` | y/n prompt per never-synced skill (see "New skills ask first") |
-| `categorize <skill> <category...>` | set a skill's groups; `--add` / `--remove` change membership without touching the rest |
+| `categorize <skill> <category...>` | set a skill's groups; `--add` / `--remove` change membership without touching the rest. A group may nest: `work/acme` |
 | `update` | update skill-sync itself from GitHub, backing up the current version (`--check`, `--force`) |
 | `place <skill> <client...>` | copy or symlink a skill into another client's folder — `claude`, `gemini`, `agents`/`cursor`/`antigravity`/`opencode` (`--dest`, `--force`, `--symlink`) |
 | `merge <skill>` | Markdown diff and merge conflicts between local and remote |
@@ -74,6 +76,46 @@ Exit codes: `0` fine, `1` error or blocked, `2` the user must choose something.
 On a **second computer**: same steps, then `pull` to list the categories and
 `pull <category>` to bring down what belongs on that machine. Restart Claude Code
 afterwards so the new skills are discovered.
+
+## Packs
+
+A pack is a **named list of skill names** — no folders, nothing moved on the remote — that
+gets deployed into one project or one client. It is the answer to "set this new project up
+with everything I use for web work", and to "give Claude this bundle but not Cursor".
+
+```
+pack list                          every pack, its size, what it inherits
+pack show web                      the skills it resolves to, and which are missing here
+pack create web --skills web-builder impeccable dataviz [--group work]
+pack create acme --extends web --skills mapa_proyecto     # inherits web's skills
+pack create acme --from-project C:\dev\acme               # seed from what is already there
+pack add|rm web <skill>...         edit membership          pack delete web
+pack apply web --project C:\dev\newsite [--client claude] [--link] [--force]
+pack apply web --client gemini     machine-wide, no project
+pack move web --from cursor --to claude --project C:\dev\acme
+pack remove web --project C:\dev\acme          uninstall (backs up, does not erase)
+pack where [--project P]           which packs are deployed here
+pack publish / pack fetch          share the definitions through the remote
+```
+
+- **Destination = root x client.** `--project` picks the root (omit it for machine-wide),
+  `--client` picks the subfolder: `claude` → `.claude/skills`, `gemini` → `.gemini/skills`,
+  `agents`/`cursor`/`antigravity`/`opencode` → `.agents/skills`. That is what makes "move
+  this bundle to Claude only" possible instead of syncing everything everywhere.
+- **`extends`** lets project packs share a base: change `web` once, `pack apply` propagates
+  it to every project that inherits from it. Circular inheritance is rejected.
+- A skill in the pack that is **not on this machine is downloaded from the remote** straight
+  into the destination (`--no-pull` disables that).
+- `--copy` (default) leaves a self-contained copy that can be committed with the project;
+  `--link` makes a junction/symlink to the master copy, so the project follows later edits.
+  Junctions need no admin rights on Windows.
+- Every deployment writes `<dest>/.skill-pack.json`, which is what `where`, `remove` and a
+  later re-`apply` read. `remove` leaves alone anything another applied pack still needs.
+- Pack definitions live in `~/.claude/skill-sync/config.json` and travel through the
+  remote's `manifest.json` via `publish` / `fetch`.
+- Applying into a `.agents/skills` folder under the current directory puts the copies in a
+  folder `push` scans, so `confirm-new` may offer to upload them; the command warns when
+  that is the case. `.claude/skills` inside a project is never scanned.
 
 ## Working rules
 
@@ -109,11 +151,30 @@ Remote layout:
 - **Groups are labels, not folders.** A skill can be in several at once. Only the first
   group decides which folder physically holds it on the remote, so adding a group moves
   nothing.
+- **A group can nest**, up to four levels: `work/acme`, `work/quimera`. Each segment is one
+  folder on the remote, and `pull work` brings down everything under `work/` while
+  `pull work/acme` brings only that one. Changing a skill's *primary* nested group moves its
+  folder on the remote, so prefer packs for per-project bundles and keep nesting for
+  storage. Groups are for where a skill lives; packs are for what a project needs.
 - A downloaded skill returns to the folder where this machine already keeps it, so a skill
   installed under `~/.gemini` is never duplicated into `~/.claude`.
 - **skill-sync does not sync itself** — it would be uploading the tool mid-upload, and a
   pull could replace the running code underneath it. It is excluded from `push`, `pull` and
   the Stop hook, and updates from GitHub via `update`.
+
+## A git repository as the provider
+
+`setup --git <url>` keeps the skills in an ordinary git repo instead of a cloud remote —
+one commit per sync, full history, any host. git is not an rclone backend, so it works the
+other way round: the repo is cloned to `~/.claude/skill-sync/gitremote/<repo>/`, that clone
+*is* the rclone remote, and every command that reads the remote pulls first while every
+command that writes it commits and pushes. The clone gets a `.gitignore` for `.trash/`.
+
+- **Credentials are never prompted for** (`GIT_TERMINAL_PROMPT=0`), so nothing can hang a
+  session. Clone the repo by hand once to set them up; until then setup reports the failure.
+- A failed push is not data loss: the commit is already local, and the command prints the
+  exact `git -C <clone> push` to rerun.
+- `doctor` reports the repo, the branch, uncommitted changes and unpushed commits.
 
 ## Automatic sync
 
