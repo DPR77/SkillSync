@@ -34,9 +34,13 @@ skill-sync-menu = "skill_sync.menu:main"
 skill-sync-install = "skill_sync.install:main"
 skill-sync-hooks = "skill_sync.install_hooks:main"
 skill-sync-watch = "skill_sync.install_watch:main"
+skill-sync-provision = "skill_sync.provision:main"
 
 [tool.setuptools]
 packages = ["skill_sync"]
+
+[tool.setuptools.package-data]
+skill_sync = ["launch.cmd", "launch.sh", "get_python.ps1"]
 
 [tool.setuptools.package-dir]
 skill_sync = "scripts"

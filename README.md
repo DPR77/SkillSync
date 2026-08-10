@@ -72,22 +72,32 @@ it picks the storage, creates the categories and registers the hooks.
 **macOS / Linux**
 
 ```bash
-python3 scripts/install.py
+sh scripts/launch.sh install.py
 ```
 
 **Windows**
 
 ```powershell
-python scripts\install.py
+scripts\launch.cmd install.py
 ```
 
-Requires Python 3.8+. The installer fetches [rclone](https://rclone.org) through your
-platform's package manager if it is missing (`winget`, `brew`, or the official script),
-picks up your first existing rclone remote — or falls back to a local folder at
-`~/CloudSkills` so you can start with no cloud account at all — creates the `work`,
-`school`, `personal` categories, registers the session hooks, and installs a small
-background watcher (see below) so a brand-new skill gets noticed within seconds
-instead of on the next Claude Code turn.
+**No Python? No admin rights? Nothing to do.** The launcher finds a working Python and
+installs one for your user if there is none — `winget --scope user` first, and if that is
+not available, the official embeddable build from python.org, pinned by SHA-256. (On
+Windows this is also what stops the Store stub from swallowing the command: a bare
+`python` on a clean install opens the Microsoft Store and runs nothing.) If you already
+have Python, `python scripts/install.py` works exactly as before.
+
+The installer then fetches [rclone](https://rclone.org) the same way — `winget` or `brew`
+if you have them, otherwise the official build straight from `downloads.rclone.org`,
+verified against the checksum the rclone project publishes and unpacked into
+`~/.claude/skill-sync/bin`. It picks up your first existing rclone remote — or falls back
+to a local folder at `~/CloudSkills` so you can start with no cloud account at all —
+creates the `work`, `school`, `personal` categories and registers the session hooks.
+
+Add `--watch` for the background watcher (see below), which notices a brand-new skill
+within seconds instead of on the next Claude Code turn. It is opt-in because it adds a
+login item; see [SECURITY.md](SECURITY.md).
 
 <details>
 <summary><b>Install it as a command instead of a folder of scripts</b></summary>
@@ -281,6 +291,17 @@ or replacing its code mid-pull, is not worth the trouble. It updates from GitHub
   your cloud quota. `doctor` reports how much is held.
 - **No credentials of ours.** Cloud tokens live in rclone's config; skill-sync stores only
   the remote's name.
+- **Verified downloads.** The tools skill-sync installs for you are fetched over HTTPS from
+  their own project's servers and checked against a published SHA-256. A mismatch installs
+  nothing.
+- **Nothing at login unless you ask.** The watcher is the only piece that survives a
+  reboot, and it takes an explicit `--watch`.
+
+Automated scanners rate skill-sync **medium risk** — it starts at login if you let it,
+reaches the network, runs installers and edits `settings.json`, which is the same shape as
+software you would not want. [**SECURITY.md**](SECURITY.md) is the full inventory: every
+host contacted, every file written outside your skills folders, and the command to turn
+each behaviour off. Read it before you point this at an account you care about.
 
 ---
 

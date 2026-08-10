@@ -1441,9 +1441,13 @@ def screen_setup(term, cfg):
             lines += [f"  {C.bold('i')} {C.dim('install it now')}   "
                       f"{C.dim('runs')} {C.cyan(shown)}"]
         else:
-            lines += ["  " + C.dim("run this yourself, it needs root:"),
+            lines += ["  " + C.dim("no unprivileged package manager here; this needs root:"),
                       "      " + C.cyan(shown), ""]
         lines += [
+            f"  {C.bold('d')} {C.dim('download it')}   "
+            f"{C.dim('official build from downloads.rclone.org, checksum-verified,')}",
+            f"      {C.dim('unpacked into')} {C.cyan(str(sync.STATE_DIR / 'bin'))} "
+            f"{C.dim('- no admin, no package manager')}",
             f"  {C.bold('r')} {C.dim('re-check')}   "
             f"{C.dim('already installed? this looks again, PATH and all')}",
             f"  {C.bold('esc')} {C.dim('back')}",
@@ -1457,6 +1461,10 @@ def screen_setup(term, cfg):
             return cfg
         if key == "i" and argv:
             run_action(term, shown, lambda a=argv: _sp.run(a, check=False))
+        elif key == "d":
+            import provision
+            run_action(term, "download rclone from downloads.rclone.org",
+                       lambda: provision.install_rclone(force=True))
         elif key != "r":
             continue
         exe = sync.rclone_bin(required=False)

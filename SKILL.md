@@ -12,7 +12,9 @@ grouped by category.
 
 Every command is `python scripts/sync.py <subcommand>`, run from this skill's directory
 (`python3` on macOS/Linux if `python` is not on PATH). Add `--json` to `status`, `push`,
-`doctor` or `merge` when reading the output programmatically.
+`doctor` or `merge` when reading the output programmatically. When Python itself may be
+missing, go through the launcher instead: `scripts\launch.cmd sync.py <subcommand>` on
+Windows, `scripts/launch.sh sync.py <subcommand>` elsewhere.
 
 ## On invocation: open the menu
 
@@ -28,17 +30,23 @@ path. Depending on how it was installed the skill lives in `~/.claude/skills/ski
 `~/.agents/skills/skill-sync` (what `npx skills add` uses, symlinked into the clients) or
 `~/.gemini/config/skills/skill-sync`, so a fixed path is wrong about as often as it is right.
 
+**Spawn the launcher, not `python`.** `scripts/launch.cmd` and `scripts/launch.sh` find a
+Python that actually runs and install one for the user if there is none. Calling `python
+menu.py` directly is what used to fail silently: on a clean Windows `python` resolves to
+the Microsoft Store stub, which opens the Store and runs nothing, so the console closed
+with no message.
+
 Windows — **always cmd, never PowerShell** (`Start-Process` only spawns the window):
 
 ```
-Start-Process cmd -ArgumentList '/K','python "<this skill folder>\scripts\menu.py"'
+Start-Process cmd -ArgumentList '/K','"<this skill folder>\scripts\launch.cmd"'
 ```
 
 macOS/Linux (Bash tool) — swap `x-terminal-emulator` for the terminal the user has
 (`gnome-terminal`, `konsole`, `xterm`, or `open -a Terminal.app` on macOS):
 
 ```
-nohup x-terminal-emulator -e "python3 '<this skill folder>/scripts/menu.py'" >/dev/null 2>&1 &
+nohup x-terminal-emulator -e "sh '<this skill folder>/scripts/launch.sh'" >/dev/null 2>&1 &
 ```
 
 `menu.py` refuses to run inside tool calls and the `!` prefix, which have no real TTY; a
@@ -67,6 +75,10 @@ below instead. Everything the menu does is available as one.
 
 Exit codes: `0` fine, `1` error or blocked, `2` the user must choose something.
 
+Two helpers live outside `sync.py`:
+`python scripts/provision.py rclone` installs rclone without admin rights (`which` reports
+what is present), and `scripts/launch.cmd` / `scripts/launch.sh` do the same for Python.
+
 ## First run on a computer
 
 **Open the menu and let the user drive it.** With nothing configured it goes straight into
@@ -80,12 +92,14 @@ registers hooks, so do not run it on the user's behalf without being asked to.
 By hand, when the menu is not an option:
 
 1. `python scripts/sync.py doctor` — confirms whether rclone and a config exist.
-2. If rclone is missing, tell the user to install it (`winget install Rclone.Rclone`,
-   `brew install rclone`, `sudo apt install rclone`) and to run `rclone config`
+2. If rclone is missing, run `python scripts/provision.py rclone`. It tries winget or
+   Homebrew, and falls back to the official checksum-verified build from
+   `downloads.rclone.org` into `~/.claude/skill-sync/bin` — so a machine with no admin
+   rights and no package manager still works. Then the user runs `rclone config`
    **themselves** — it is interactive, so Claude cannot drive it (in Claude Code they can
-   prefix it with `!`). Per-provider steps: `references/providers.md`. If they say it is
-   already installed, they are probably right: a terminal opened before the install keeps
-   the old PATH, and `doctor` reports the path it found off-PATH.
+   prefix it with `!`). Per-provider steps: `references/providers.md`. If they say rclone
+   is already installed, they are probably right: a terminal opened before the install
+   keeps the old PATH, and `doctor` reports the path it found off-PATH.
 3. Ask which categories they want, then
    `python scripts/sync.py setup --remote <remote:> --categories work,school,personal`.
    Do not invent categories. For a git repo instead: `setup --git <url>`.
@@ -239,7 +253,9 @@ silently:
 - `install_watch.py` starts `watch_new_skills.py` at login (Startup folder on Windows, a
   LaunchAgent on macOS, a systemd `--user` unit or XDG autostart entry on Linux — no admin
   or root anywhere). It polls every few seconds, waits for a new skill's files to stop
-  changing, then runs the same check `hook-stop` does.
+  changing, then runs the same check `hook-stop` does. It is **opt-in**: nothing installs
+  it unless the user asks, including `install.py`, which needs `--watch`. An autostart
+  entry is the most malware-shaped thing here, so it never appears as a side effect.
 - That watcher, or the next `hook-stop`, opens a separate console running
   `sync.py confirm-new`: one y/n prompt per new skill, with its description. Yes pushes it;
   no — or ignoring the window — means it will not ask again unless the skill changes.
@@ -270,7 +286,12 @@ silently:
 - `scripts/install.py` — one-shot installer: rclone, a default remote, categories, hooks.
 - `scripts/install_hooks.py` — installs/removes the session hooks.
 - `scripts/install_watch.py`, `scripts/watch_new_skills.py` — new-skill watcher.
+- `scripts/launch.cmd`, `scripts/launch.sh` — find or install Python, then run a script.
+- `scripts/get_python.ps1` — pinned, checksum-verified Python download (Windows fallback).
+- `scripts/provision.py` — installs rclone, package manager first, verified download second.
 - `scripts/platform_scanner.py` — detects installed AI clients and their folders.
 - `scripts/selftest.py`, `scripts/crud_test.py`, `scripts/edge_test.py` — test suites.
 - `references/providers.md` — rclone setup per provider, bootstrapping a new machine.
 - `references/troubleshooting.md` — errors, conflicts, recovery from `.trash`.
+- `SECURITY.md` — every behaviour a scanner flags, the hosts contacted, and how to switch
+  each one off. Point users here when they ask about the risk rating.

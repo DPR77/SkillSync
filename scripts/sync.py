@@ -429,10 +429,11 @@ def rclone_candidates():
 
     winget, Homebrew and Scoop all extend PATH for *future* shells, so a terminal that was
     already open when rclone was installed reports it missing - and the menu then sent
-    people off to install something they already had.
+    people off to install something they already had. The state dir comes first: that is
+    where provision.py puts the copy it downloads when no package manager is available.
     """
     exe = "rclone.exe" if os.name == "nt" else "rclone"
-    paths = []
+    paths = [STATE_DIR / "bin" / exe]
     if os.name == "nt":
         local = Path(os.environ.get("LOCALAPPDATA") or (HOME / "AppData" / "Local"))
         paths.append(local / "Microsoft" / "WinGet" / "Links" / exe)
@@ -468,7 +469,9 @@ def rclone_bin(required=True, _cache={}):
                     continue
     if not exe and required:
         raise SyncError(
-            "rclone was not found. Install it, then run `rclone config`:\n"
+            "rclone was not found. skill-sync can install it for you, no admin needed:\n"
+            "  python scripts/provision.py rclone\n"
+            "Or install it yourself, then run `rclone config`:\n"
             "  Windows: winget install Rclone.Rclone\n"
             "  macOS:   brew install rclone\n"
             "  Linux:   sudo apt install rclone | sudo dnf install rclone\n"
@@ -1265,6 +1268,10 @@ def fetch_latest_version(timeout=4):
 
 def update_available(force=False, timeout=4):
     """(latest, is_newer, reason) using a cached answer, checked at most once a day."""
+    # The only network call skill-sync makes on its own, so it is the only one worth an
+    # off switch: `"update_check": false` in config.json and nothing here reaches out.
+    if not force and (load_config() or {}).get("update_check", True) is False:
+        return None, False, "update checks are disabled in config.json"
     st = load_state()
     cached = st.get("update_check") or {}
     fresh = time.time() - float(cached.get("at") or 0) < UPDATE_CHECK_INTERVAL
@@ -2839,7 +2846,7 @@ def cmd_doctor(args):
         print(f"rclone         : {exe} ({out.splitlines()[0] if out else 'unknown'})")
     else:
         ok = False
-        print("rclone         : NOT FOUND  -> winget install Rclone.Rclone | brew install rclone")
+        print("rclone         : NOT FOUND  -> python scripts/provision.py rclone")
 
     if not cfg:
         ok = False
