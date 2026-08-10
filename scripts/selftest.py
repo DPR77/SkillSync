@@ -53,6 +53,26 @@ def fake_python_stub(root: Path) -> Path:
     return stub
 
 
+def powershell_runs(command: str, root: Path) -> bool:
+    """Run a hook command the way Claude Code does on Windows: through PowerShell.
+
+    A quoted interpreter path without the call operator is a ParserError there, which no
+    amount of checking the string for quotes would have caught.
+    """
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if not shell:
+        return True
+    script = root / "hook_probe.ps1"
+    script.write_text(command + "\n", encoding="utf-8")
+    try:
+        done = subprocess.run([shell, "-NoProfile", "-NonInteractive",
+                               "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                              capture_output=True, text=True, timeout=180)
+    except Exception:
+        return False
+    return done.returncode == 0 and "ParserError" not in (done.stderr or "")
+
+
 def menu_visible_len(line: str) -> int:
     """menu.py's own width calculation, so the UI checks measure what it measures."""
     import importlib.util
@@ -453,6 +473,23 @@ def main() -> int:
               not ih.is_interpreter(str(root / "no-such-python")))
         check("a stub that exits non-zero is rejected, not written into the hook",
               not ih.is_interpreter(str(fake_python_stub(root))))
+
+        real_python_exe = ih.python_exe
+        try:
+            ih.python_exe = lambda: "C:/Program Files/Python311/python.exe"
+            spaced = ih.hook_command("hook-stop")
+        finally:
+            ih.python_exe = real_python_exe
+        plain = ih.hook_command("hook-stop")
+        if os.name == "nt":
+            check("an interpreter path with spaces is called, not just quoted",
+                  spaced.startswith('& "'), spaced)
+            check("a path without spaces needs no call operator",
+                  not plain.startswith("&"), plain)
+            check("the generated hook actually parses and runs in PowerShell",
+                  powershell_runs(plain, root), plain)
+        else:
+            check("the call operator is Windows-only", not spaced.startswith("&"), spaced)
 
     finally:
         failed = [r for r in results if r[0] == FAIL]

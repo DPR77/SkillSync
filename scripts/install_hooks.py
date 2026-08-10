@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -75,7 +76,15 @@ def quote(s: str) -> str:
 def hook_command(subcommand: str) -> str:
     exe = quote(python_exe())
     script = quote(SYNC_SCRIPT.as_posix())
-    return f"{exe} {script} {subcommand} --quiet"
+    command = f"{exe} {script} {subcommand} --quiet"
+    # Claude Code runs hooks through PowerShell on Windows, and there a line that starts
+    # with a quoted path is a string expression, not a command: the interpreter runs and
+    # the arguments after the closing quote are an "unexpected token" ParserError. The
+    # call operator turns it back into a command. Anyone whose Python lives under
+    # "C:\Program Files" or a user name with a space hit this on every session.
+    if os.name == "nt" and exe.startswith('"'):
+        command = f"& {command}"
+    return command
 
 
 def is_ours(entry: dict) -> bool:
