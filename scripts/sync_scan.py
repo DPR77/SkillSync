@@ -1,4 +1,4 @@
-"""Local side: skill discovery, ignore rules, hashing, status and pre-push guards.
+"""Local side only: skill discovery, ignore rules, hashing, groups and the credential scan.
 
 Part of skill-sync; `sync.py` is the entry point and re-exports these names.
 """
@@ -9,51 +9,24 @@ import fnmatch
 import hashlib
 import os
 import re
-import shutil
 import tempfile
-import time
-from datetime import datetime
 from pathlib import Path
 
 from sync_core import (  # noqa: F401
-    CONFLICT,
-    CONFLICTS_DIR,
     FPCACHE_FILE,
     IGNORE_DIRS,
     IGNORE_FILES,
-    IN_SYNC,
-    KEEP_TRASH_DAYS,
-    LOCAL_NEW,
-    ONLY_LOCAL,
-    ONLY_REMOTE,
     PLACEHOLDER_RE,
-    REMOTE_NEW,
-    REMOTE_TRASH_SWEEP_INTERVAL,
-    REMOTE_TRASH_SWEEP_MAX,
     SECRET_ALLOW_PRAGMA,
     SECRET_PATTERNS,
     SECRET_SCAN_EXT,
     SECRET_SCAN_MAX_BYTES,
     SELF_NAME,
     SKILLS_DIR,
-    STATE_FILE,
-    Spinner,
     SyncError,
-    TRASH_DIR,
-    VERSION_FILE,
     load_json,
-    load_state,
     local_skills_map,
-    log,
-    now_iso,
-    progress_bar,
     save_json,
-    stamp,
-)
-from sync_remote import (  # noqa: F401
-    rclone,
-    read_manifest,
-    rpath,
 )
 
 
@@ -229,77 +202,6 @@ def skill_dest_dir(name, cfg=None, default=None):
     return default or SKILLS_DIR
 
 
-# -------------------------------------------------------------------- status
-
-def classify(i) -> str:
-    if not i["remote"]:
-        return ONLY_LOCAL
-    if not i["local"]:
-        return ONLY_REMOTE
-    lh, rh, sh = i["local_hash"], i["remote_hash"], i["synced_hash"]
-    if lh == rh:
-        return IN_SYNC
-    if sh is None:
-        return CONFLICT                       # both sides exist, differ, no known ancestor
-    if sh == rh:
-        return LOCAL_NEW
-    if sh == lh:
-        return REMOTE_NEW
-    return CONFLICT                           # both moved since the last sync
-
-
-def compute_status(cfg, manifest=None):
-    state = load_state()
-    manifest = read_manifest(cfg) if manifest is None else manifest
-    remote_skills = manifest.get("skills", {})
-    result = {}
-
-    lmap = local_skills_map(cfg)
-    scanned = 0
-    for name, skill_dir in lmap.items():
-        if is_self(name):
-            continue
-        # Hashing every skill takes a visible moment the first time, before the cache is
-        # warm. Say what is happening rather than freezing on a blank screen.
-        scanned += 1
-        progress_bar(scanned, len(lmap), f"scanning {name}")
-        fp, mtime, count, size = fingerprint_cached(skill_dir)
-        prev = state["skills"].get(name, {})
-        rem = remote_skills.get(name)
-        cats = entry_categories(rem) or list(prev.get("categories") or [])
-        if not cats and prev.get("category"):
-            cats = [prev["category"]]
-        origin, badge = detect_native_origin(skill_dir)
-        info = {
-            "name": name, "local": True, "local_path": str(skill_dir), "remote": bool(rem),
-            "native_origin": origin, "origin_badge": badge,
-            "category": (rem or {}).get("category") or prev.get("category"),
-            "categories": cats,
-            "local_hash": fp, "remote_hash": (rem or {}).get("hash"),
-            "synced_hash": prev.get("hash"),
-            "mtime": mtime, "files": count, "size": size,
-            "remote_updated": (rem or {}).get("updated_at"),
-            "remote_machine": (rem or {}).get("machine"),
-        }
-        info["state"] = classify(info)
-        result[name] = info
-
-    for name, rem in remote_skills.items():
-        if is_self(name) or name in result:
-            continue
-        result[name] = {
-            "name": name, "local": False, "local_path": None, "remote": True,
-            "category": primary_category(rem), "categories": entry_categories(rem),
-            "local_hash": None,
-            "remote_hash": rem.get("hash"), "synced_hash": None,
-            "mtime": 0, "files": rem.get("files", 0), "size": rem.get("size", 0),
-            "remote_updated": rem.get("updated_at"), "remote_machine": rem.get("machine"),
-            "state": ONLY_REMOTE,
-        }
-    save_fp_cache()
-    return result
-
-
 # -------------------------------------------------------------------- guards
 
 def scan_secrets(skill_dir: Path):
@@ -337,60 +239,6 @@ def scan_secrets(skill_dir: Path):
         if found:
             hits.append(found)
     return hits
-
-
-def push_skill(cfg, name, category, dry_run=False, skill_dir=None):
-    if skill_dir is None:
-        lmap = local_skills_map(cfg)
-        src = lmap.get(name) or (SKILLS_DIR / name)
-    else:
-        src = Path(skill_dir)
-    dst = rpath(cfg, category, name)
-    filt = rclone_filter_file(src)
-    try:
-        args = ["sync", str(src), dst, "--checksum", "--exclude-from", filt,
-                "--backup-dir", rpath(cfg, ".trash", stamp(), name)]
-        if dry_run:
-            args.append("--dry-run")
-        with Spinner(f"uploading {name} to {category}/"):
-            rclone(args, timeout=1800)
-    finally:
-        try:
-            os.unlink(filt)
-        except OSError:
-            pass
-    return dst
-
-
-def pull_skill(cfg, name, category, dest_root: Path, dry_run=False):
-    src = rpath(cfg, category, name)
-    dst = dest_root / name
-    args = ["sync", src, str(dst), "--checksum",
-            "--backup-dir", str(TRASH_DIR / stamp() / name)]
-    if dry_run:
-        args.append("--dry-run")
-    with Spinner(f"downloading {name}"):
-        code, out, err = rclone(args, timeout=1800, check=False)
-        if code != 0:
-            if "directory not found" in err.lower() or "directory not found" in out.lower():
-                raise SyncError("directory not found on remote")
-            raise SyncError(f"rclone failed ({code}): {err.strip() or out.strip()}")
-    return dst
-
-
-def stash_remote_copy(cfg, name, category):
-    dest = CONFLICTS_DIR / f"{name}-remote-{stamp()}"
-    dest.mkdir(parents=True, exist_ok=True)
-    with Spinner(f"saving the remote copy of {name}"):
-        rclone(["copy", rpath(cfg, category, name), str(dest), "--checksum"], timeout=1800)
-    return dest
-
-
-def record_synced(name, category, hash_value, mtime, files):
-    st = load_state()
-    st["skills"][name] = {"hash": hash_value, "category": category, "mtime": mtime,
-                          "count": files, "synced_at": now_iso()}
-    save_json(STATE_FILE, st)
 
 
 def entry_categories(entry) -> list:
@@ -458,94 +306,4 @@ def category_tree_lines(by_cat: dict, indent="  ") -> list:
     return lines
 
 
-def manifest_entry(cfg, category, fp, size, files, categories=None, native_origin=None):
-    cats = [c for c in (categories or [category]) if c]
-    if category and category not in cats:
-        cats.insert(0, category)
-    entry = {"category": category, "categories": cats, "hash": fp, "size": size,
-             "files": files, "updated_at": now_iso(), "machine": cfg["machine"]}
-    if native_origin:
-        entry["native_origin"] = native_origin
-    return entry
-
-
 STAMP_RE = re.compile(r"(\d{8}-\d{6})")
-
-
-def _stamp_age_days(name: str):
-    """Age of a backup folder, whose stamp sits at the start (trash) or the end
-    (conflicts, named `<skill>-remote-<stamp>`). None when there is no stamp to read -
-    those are left alone rather than guessed at."""
-    m = STAMP_RE.search(name or "")
-    if not m:
-        return None
-    try:
-        return (datetime.now() - datetime.strptime(m.group(1), "%Y%m%d-%H%M%S")).days
-    except ValueError:
-        return None
-
-
-def purge_backups(cfg=None):
-    """Delete replaced-file backups older than KEEP_TRASH_DAYS.
-
-    Local cleanup is filesystem-cheap and runs every time. The remote side is not: each
-    stale folder costs a listing and a recursive delete against the provider's API, and
-    running that after every push made a one-file upload take minutes. So the remote sweep
-    happens once a day at most, and only clears a few folders per run - they are not
-    urgent, and the next sync picks up where this one stopped.
-    """
-    for root in (TRASH_DIR, CONFLICTS_DIR):
-        if not root.exists():
-            continue
-        for entry in root.iterdir():
-            age = _stamp_age_days(entry.name)
-            if age is not None and age > KEEP_TRASH_DAYS:
-                shutil.rmtree(entry, ignore_errors=True)
-    if not cfg:
-        return
-
-    st = load_state()
-    if time.time() - float(st.get("trash_swept_at") or 0) < REMOTE_TRASH_SWEEP_INTERVAL:
-        return
-    st = load_state()
-    st["trash_swept_at"] = time.time()
-    save_json(STATE_FILE, st)
-
-    code, out, _e = rclone(["lsf", rpath(cfg, ".trash"), "--dirs-only"], check=False, timeout=60)
-    if code != 0:
-        return
-    stale = [line.strip().strip("/") for line in out.splitlines()]
-    stale = [n for n in stale
-             if (_stamp_age_days(n) or 0) > KEEP_TRASH_DAYS]
-    for name in sorted(stale)[:REMOTE_TRASH_SWEEP_MAX]:
-        rclone(["purge", rpath(cfg, ".trash", name)], check=False, timeout=120)
-    if len(stale) > REMOTE_TRASH_SWEEP_MAX:
-        log(f"trash sweep: {len(stale) - REMOTE_TRASH_SWEEP_MAX} folders left for next time")
-
-
-def trash_size_bytes():
-    total = 0
-    for root in (TRASH_DIR, CONFLICTS_DIR):
-        if not root.exists():
-            continue
-        for path in root.rglob("*"):
-            try:
-                if path.is_file():
-                    total += path.stat().st_size
-            except OSError:
-                continue
-    return total
-
-
-# ------------------------------------------------------------------- updates
-
-def local_version() -> str:
-    try:
-        return VERSION_FILE.read_text(encoding="utf-8").strip() or "0"
-    except OSError:
-        pass
-    try:  # pip-installed: no VERSION file next to the package, read the metadata
-        from importlib.metadata import version as _pkg_version
-        return _pkg_version("skill-sync")
-    except Exception:
-        return "0"

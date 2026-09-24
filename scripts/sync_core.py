@@ -400,6 +400,20 @@ class Lock:
         return False
 
 
+# ------------------------------------------------------------------- updates
+
+def local_version() -> str:
+    try:
+        return VERSION_FILE.read_text(encoding="utf-8").strip() or "0"
+    except OSError:
+        pass
+    try:  # pip-installed: no VERSION file next to the package, read the metadata
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("skill-sync")
+    except Exception:
+        return "0"
+
+
 def load_packs(cfg) -> dict:
     packs = cfg.get("packs")
     return packs if isinstance(packs, dict) else {}

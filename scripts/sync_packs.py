@@ -28,17 +28,17 @@ from sync_core import (  # noqa: F401
     save_json,
     stamp,
 )
+from sync_scan import (  # noqa: F401
+    is_self,
+    primary_category,
+)
 from sync_remote import (  # noqa: F401
     base_path,
     git_sync_in,
     git_sync_out,
+    pull_skill,
     read_manifest,
     write_manifest,
-)
-from sync_scan import (  # noqa: F401
-    is_self,
-    primary_category,
-    pull_skill,
 )
 from sync_usage import (  # noqa: F401
     usage_for_project,

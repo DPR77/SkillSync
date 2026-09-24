@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import difflib
 import json
 import os
 import re
@@ -35,10 +36,14 @@ from sync_core import (  # noqa: F401
     BIG_SKILL_BYTES,
     CONFIG_FILE,
     CONFLICT,
+    CONFLICTS_DIR,
     HOME,
     HOOK_BUDGET_SECONDS,
     IN_SYNC,
+    KEEP_TRASH_DAYS,
     LOCAL_NEW,
+    LOCK_FILE,
+    LOG_FILE,
     Lock,
     NO_CATEGORY,
     ONLY_LOCAL,
@@ -62,6 +67,7 @@ from sync_core import (  # noqa: F401
     load_packs,
     load_state,
     local_skills_map,
+    local_version,
     lock_is_live,
     log,
     machine_name,
@@ -69,53 +75,53 @@ from sync_core import (  # noqa: F401
     progress_bar,
     require_config,
     save_json,
-)
-from sync_remote import (  # noqa: F401
-    GIT_CLONE_DIR,
-    MANIFEST_TEXT_MAX,
-    base_path,
-    ensure_git_clone,
-    git_bin,
-    git_cfg,
-    git_sync_in,
-    git_sync_out,
-    normalise_remote,
-    rclone,
-    rclone_bin,
-    read_manifest,
-    rpath,
-    sanitize_manifest,
-    write_manifest,
+    stamp,
 )
 from sync_scan import (  # noqa: F401
     category_matches,
     category_tree_lines,
-    compute_status,
     entry_categories,
     fingerprint,
     fingerprint_cached,
     is_self,
     local_skills,
-    manifest_entry,
     normalise_category,
     primary_category,
-    pull_skill,
-    purge_backups,
-    push_skill,
     quick_sig,
-    record_synced,
     scan_secrets,
     skill_dest_dir,
     skill_path,
     syncable,
 )
+from sync_remote import (  # noqa: F401
+    GIT_CLONE_DIR,
+    MANIFEST_TEXT_MAX,
+    base_path,
+    compute_status,
+    ensure_git_clone,
+    git_bin,
+    git_cfg,
+    git_clone_path,
+    git_run,
+    git_sync_in,
+    git_sync_out,
+    manifest_entry,
+    normalise_remote,
+    pull_skill,
+    purge_backups,
+    push_skill,
+    rclone,
+    rclone_bin,
+    read_manifest,
+    record_synced,
+    rpath,
+    sanitize_manifest,
+    stash_remote_copy,
+    trash_size_bytes,
+    write_manifest,
+)
 from sync_usage import (  # noqa: F401
-    CLAUDE_PROJECTS_DIR,
     USAGE_HOOK_BUDGET_BYTES,
-    cmd_doctor,
-    cmd_merge,
-    cmd_prune,
-    cmd_resolve,
     cmd_usage,
     scan_usage,
     usage_for_project,
@@ -680,6 +686,244 @@ def cmd_place(args):
         print("Restart the target client(s) so they discover the skill.")
     log(f"place {name} -> {[l for l, _ in placed]}")
     return 0 if placed or not targets else 1
+
+
+def cmd_resolve(args):
+    cfg = require_config()
+    git_sync_in(cfg)
+    name = args.skill
+    with Lock():
+        manifest = read_manifest(cfg)
+        entry = manifest["skills"].get(name)
+        if not entry:
+            raise SyncError(f"{name} is not on the remote - nothing to resolve")
+        category = primary_category(entry, NO_CATEGORY)
+        categories = entry_categories(entry) or [category]
+
+        # The skill may live under any client's folder, not just SKILLS_DIR.
+        local_dir = skill_path(name, cfg)
+
+        if args.keep == "local":
+            if local_dir is None:
+                raise SyncError(f"{name} does not exist in any local skills dir")
+            backup = stash_remote_copy(cfg, name, category)
+            print(f"remote version saved to: {backup}")
+            with Spinner(f"hashing {name}"):
+                fp, mtime, files, size = fingerprint(local_dir)
+            push_skill(cfg, name, category, skill_dir=local_dir)
+            write_manifest(cfg, {name: manifest_entry(cfg, category, fp, size, files,
+                                                      categories=categories)})
+            record_synced(name, category, fp, mtime, files)
+            git_sync_out(cfg, f"resolve {name} (keep local)")
+            print(f"resolved: LOCAL version of {name} is now on the remote")
+        else:
+            dest_root = skill_dest_dir(name, cfg)
+            if local_dir is not None:
+                backup = CONFLICTS_DIR / f"{name}-local-{stamp()}"
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(local_dir, backup, dirs_exist_ok=True)
+                print(f"local version saved to: {backup}")
+            dest_root.mkdir(parents=True, exist_ok=True)
+            pull_skill(cfg, name, category, dest_root)
+            with Spinner(f"hashing {name}"):
+                fp, mtime, files, _size = fingerprint(dest_root / name)
+            record_synced(name, category, fp, mtime, files)
+            print(f"resolved: REMOTE version of {name} is now local ({dest_root / name})")
+        log(f"resolve {name} keep={args.keep}")
+        return 0
+
+
+def cmd_prune(args):
+    cfg = require_config()
+    git_sync_in(cfg)
+    with Lock():
+        manifest = read_manifest(cfg)
+        local = set(local_skills())
+        orphans = sorted(n for n in manifest.get("skills", {}) if n not in local)
+        if not args.only:
+            targets = orphans
+        else:
+            targets = [n for n in orphans if n in args.only]
+            missing = set(args.only) - set(orphans)
+            for n in sorted(missing):
+                print(f"skipped {n}: still exists locally or is not on the remote")
+        if not targets:
+            print("Nothing to prune: every remote skill also exists on this machine.")
+            return 0
+
+        print("Remote skills that do NOT exist on this machine:")
+        for n in targets:
+            e = manifest["skills"][n]
+            print(f"  {n}  (category {e.get('category')}, uploaded by {e.get('machine')} "
+                  f"on {e.get('updated_at')})")
+        if not args.yes:
+            print("\nWARNING: deleting is permanent for every machine. If a skill only lives on")
+            print("another computer, pruning it here loses it there too.")
+            print("Re-run with --yes to delete (optionally --only <skill> ...).")
+            return 2
+
+        for n in targets:
+            category = primary_category(manifest["skills"][n], NO_CATEGORY)
+            print(f"deleting remote {category}/{n}")
+            rclone(["purge", rpath(cfg, category, n)], check=False, timeout=900)
+        write_manifest(cfg, {}, drop=targets)
+        st = load_state()
+        for n in targets:
+            st["skills"].pop(n, None)
+        save_json(STATE_FILE, st)
+        print(f"Removed {len(targets)} skill(s) from the remote.")
+        log(f"prune {targets}")
+        git_sync_out(cfg, f"prune {', '.join(sorted(targets)[:6])}")
+        return 0
+
+
+def cmd_doctor(args):
+    ok = True
+    cfg = load_config()
+    s_dirs = get_all_skill_dirs(cfg)
+    dirs_str = ", ".join(str(d) for d in s_dirs)
+    exe = rclone_bin(required=False)
+    settings = HOME / ".claude" / "settings.json"
+    data = load_json(settings, {}) or {}
+    hooks = json.dumps(data.get("hooks", {}))
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "version": local_version(),
+            "skills_dirs": [str(d) for d in s_dirs],
+            "total_skills": len(local_skills(cfg)),
+            "state_dir": str(STATE_DIR),
+            "rclone": exe,
+            "has_config": bool(cfg),
+            "stop_hook": "hook-stop" in hooks,
+            "session_start_hook": "hook-session-start" in hooks,
+            "lock_exists": LOCK_FILE.exists(),
+            "lock_live": lock_is_live(),
+            "trash_bytes": trash_size_bytes(),
+        }, indent=2, ensure_ascii=False))
+        return 0
+
+    print(f"version        : {local_version()}")
+    print(f"skills dirs    : {dirs_str} "
+          f"({len(local_skills(cfg))} total skills)")
+    print(f"state dir      : {STATE_DIR}")
+    if exe:
+        _c, out, _e = rclone(["version"], check=False, timeout=30)
+        print(f"rclone         : {exe} ({out.splitlines()[0] if out else 'unknown'})")
+    else:
+        ok = False
+        print("rclone         : NOT FOUND  -> python scripts/provision.py rclone")
+
+    if not cfg:
+        ok = False
+        print("config         : missing  -> python sync.py setup --remote <remote:>")
+    else:
+        print(f"config         : {CONFIG_FILE}")
+        print(f"remote         : {base_path(cfg)}")
+        print(f"categories     : {', '.join(cfg.get('categories', [])) or '(none)'}")
+        packs = load_packs(cfg)
+        if packs:
+            print(f"packs          : {', '.join(sorted(packs))}")
+        g = git_cfg(cfg)
+        if g:
+            clone = git_clone_path(cfg)
+            gexe = git_bin(required=False)
+            print(f"git repo       : {g['url']}  (branch {g.get('branch')})")
+            if not gexe:
+                ok = False
+                print("git            : NOT FOUND  -> install git and put it on PATH")
+            elif not (clone / ".git").exists():
+                print(f"git clone      : {clone}  (not cloned yet, happens on first use)")
+            else:
+                _c, out, _e = git_run(clone, ["status", "--porcelain"], check=False)
+                _c2, ahead, _e2 = git_run(
+                    clone, ["rev-list", "--count", f"origin/{g.get('branch')}..HEAD"],
+                    check=False)
+                dirty = len([l for l in out.splitlines() if l.strip()])
+                print(f"git clone      : {clone}")
+                print(f"git state      : {dirty} uncommitted change(s), "
+                      f"{(ahead or '0').strip() or '0'} commit(s) not pushed")
+        if exe:
+            code, _o, err = rclone(["lsf", base_path(cfg), "--max-depth", "1"],
+                                   check=False, timeout=90)
+            if code == 0:
+                print("remote reach   : OK")
+            else:
+                ok = False
+                print(f"remote reach   : FAILED - {err.strip().splitlines()[-1][:160] if err else ''}")
+
+    print(f"Stop hook      : {'installed' if 'hook-stop' in hooks else 'not installed'}")
+    print(f"SessionStart   : {'installed' if 'hook-session-start' in hooks else 'not installed'}")
+    if "hook-stop" not in hooks:
+        print("                 -> python scripts/install_hooks.py")
+    if LOCK_FILE.exists():
+        if lock_is_live():
+            print(f"lock           : held by a running sync ({LOCK_FILE})")
+        else:
+            print(f"lock           : stale ({LOCK_FILE}) - the next run clears it by itself")
+    held = trash_size_bytes()
+    if held:
+        print(f"backups        : {human_size(held)} in {TRASH_DIR.parent} "
+              f"(deleted after {KEEP_TRASH_DAYS} days)")
+    print(f"log            : {LOG_FILE}")
+    return 0 if ok else 1
+
+
+def cmd_merge(args):
+    cfg = require_config()
+    name = args.skill
+    manifest = read_manifest(cfg)
+    entry = manifest.get("skills", {}).get(name)
+    if not entry:
+        raise SyncError(f"skill '{name}' is not present on the remote")
+
+    category = primary_category(entry, NO_CATEGORY)
+    lmap = local_skills_map(cfg)
+    local_dir = lmap.get(name)
+    if not local_dir:
+        raise SyncError(f"skill '{name}' does not exist locally")
+
+    remote_stash = stash_remote_copy(cfg, name, category)
+
+    local_md = local_dir / "SKILL.md"
+    remote_md = remote_stash / "SKILL.md"
+
+    diff_lines = []
+    if local_md.exists() and remote_md.exists():
+        l_text = local_md.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        r_text = remote_md.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        diff_lines = list(difflib.unified_diff(
+            r_text, l_text,
+            fromfile=f"remote/{category}/{name}/SKILL.md",
+            tofile=f"local/{name}/SKILL.md"
+        ))
+
+    diff_text = "".join(diff_lines)
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "skill": name,
+            "category": category,
+            "local_path": str(local_dir),
+            "remote_stash": str(remote_stash),
+            "has_conflict": bool(diff_lines),
+            "diff": diff_text,
+        }, indent=2, ensure_ascii=False))
+    else:
+        print(f"Merge analysis for skill '{name}':")
+        print(f"  Local path   : {local_dir}")
+        print(f"  Remote stash  : {remote_stash}")
+        if diff_lines:
+            print("\n--- SKILL.md Diff (Remote -> Local) ---")
+            print(diff_text)
+        else:
+            print("\nSKILL.md files are identical.")
+
+    if args.keep:
+        resolve_args = argparse.Namespace(skill=name, keep=args.keep)
+        return cmd_resolve(resolve_args)
+
+    return 0
 
 
 # --------------------------------------------------------------------- hooks
