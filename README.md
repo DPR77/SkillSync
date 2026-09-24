@@ -17,6 +17,8 @@ open next — Claude Code, Gemini, Antigravity, Cursor, OpenCode.
 [Install](#install) · [Storage](#pick-your-storage) · [Commands](#what-you-get) ·
 [Menu](#interactive-menu) · [How it works](#how-it-works) · [Safety](#safety)
 
+<img src="references/images/demo.gif" alt="The skill-sync menu: status of every skill, picking skills to upload, downloading a group and deploying a pack" width="760">
+
 </div>
 
 ---
