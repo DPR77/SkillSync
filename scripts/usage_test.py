@@ -144,6 +144,15 @@ def main() -> int:
     check("the counts are rebuilt from what is on disk, not doubled",
           counts().get("beta") == 1)
 
+    print("\nremote manifest is untrusted")
+    m = sync.sanitize_manifest({"skills": {
+        "ok": {"description": "a\x1b[31mb‮c" + "x" * 5000},
+        "../escape": {}, "a/b": {}, "c:d": {}, "not-a-dict": "text"}})
+    check("unsafe skill names and malformed entries are dropped", list(m["skills"]) == ["ok"])
+    desc = m["skills"]["ok"]["description"]
+    check("control and bidi characters are stripped", "\x1b" not in desc and "‮" not in desc)
+    check("remote text is length-capped", len(desc) <= sync.MANIFEST_TEXT_MAX)
+
     print(f"\n{passed}/{passed + failed} checks passed")
     return 1 if failed else 0
 

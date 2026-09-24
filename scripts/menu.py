@@ -19,7 +19,6 @@ import argparse
 import os
 import shutil
 import sys
-import threading
 import time
 from argparse import Namespace
 from pathlib import Path
@@ -403,9 +402,6 @@ def header(cfg, summary=None, width=None):
         if os.environ.get("SKILL_SYNC_HOME"):
             lines.append("  " + C.yellow(
                 f"SKILL_SYNC_HOME is set to {os.environ['SKILL_SYNC_HOME']}"))
-    notice = update_notice()
-    if notice:
-        lines.append("  " + C.yellow(notice))
     if summary:
         lines.append("  " + summary)
     lines.append("")
@@ -629,34 +625,6 @@ def load_status(term, cfg, force=False, cache={}):
         term.raw()
     cache["data"], cache["at"] = data, time.time()
     return data
-
-
-UPDATE_STATE = {"latest": None, "newer": False, "done": False, "reason": None}
-
-
-def start_update_check():
-    """Ask GitHub about a newer release without making the user wait for it.
-
-    Runs once, in a daemon thread, so a slow or blocked network costs the menu nothing:
-    the notice simply appears on a later frame, or never.
-    """
-    def work():
-        try:
-            latest, newer, reason = sync.update_available()
-            UPDATE_STATE.update(latest=latest, newer=newer, reason=reason)
-        except Exception:
-            pass                                   # a version check never breaks the menu
-        finally:
-            UPDATE_STATE["done"] = True
-
-    threading.Thread(target=work, daemon=True).start()
-
-
-def update_notice():
-    if not UPDATE_STATE["newer"]:
-        return None
-    return (f"⬆  skill-sync {UPDATE_STATE['latest']} is available "
-            f"(you have {sync.local_version()}) - open  Update")
 
 
 ORIGIN_WIDTH = 9
@@ -1735,7 +1703,6 @@ def screen_doctor(term, cfg):
 # Format: (key, icon, text_label, description)
 # Icon and text are separated so padding is applied only to pure ASCII text.
 MENU = [
-    ("update",    "⬆", "Update",         "Fetch the latest skill-sync from GitHub"),
     ("status",    "📊", "Status",        "Inspect local vs cloud skill differences"),
     ("push",      "📤", "Upload",         "Send changed skills to cloud remote"),
     ("pull",      "📥", "Download",       "Bring skill groups onto this computer"),
@@ -1868,48 +1835,6 @@ def status_screen(term, cfg, status):
         status = load_status(term, cfg, force=True)
 
 
-def screen_update(term, cfg):
-    """Show installed vs published, then update on confirmation."""
-    term.draw(header(cfg) + ["  " + C.dim("asking GitHub for the published version ...")])
-    try:
-        latest, newer, reason = sync.update_available(force=True, timeout=8)
-    except Exception as e:
-        latest, newer, reason = None, False, f"{e.__class__.__name__}: {e}"
-    log_line = C.yellow(reason) if (latest is None and reason) else None
-    UPDATE_STATE.update(latest=latest, newer=newer, reason=reason, done=True)
-
-    installed = sync.local_version()
-    lines = header(cfg) + [
-        "  " + C.bold("Update skill-sync"), "",
-        f"    installed   {C.bold(installed)}",
-        f"    published   {C.bold(latest or C.dim('unknown'))}",
-        f"    source      {C.dim(sync.REPO_URL)}",
-        "",
-    ]
-    if log_line:
-        lines += ["  " + log_line, "", C.dim("  press any key")]
-        term.draw(lines)
-        term.read_key()
-        return
-    if not newer:
-        lines += ["  " + C.green("You are on the latest version."), "",
-                  C.dim("  press any key")]
-        term.draw(lines)
-        term.read_key()
-        return
-
-    if not confirm(term, cfg, f"Update skill-sync {installed} -> {latest}",
-                   [f"downloads {sync.ARCHIVE_URL}",
-                    "overwrites this skill's files",
-                    "keeps a full backup of the current version first"],
-                   note="Your remote, config and synced skills are untouched. Restart the "
-                        "menu afterwards so the new code is loaded."):
-        return
-    run_action(term, f"update to {latest}",
-               lambda: sync.cmd_update(Namespace(check=False, force=False)))
-    UPDATE_STATE.update(newer=False)
-
-
 def main_loop(term):
     cursor = 0
     cfg = sync.load_config()
@@ -1946,9 +1871,6 @@ def main_loop(term):
         choice = MENU[cursor][0]
         if choice == "quit":
             return 0
-        if choice == "update":
-            screen_update(term, cfg)
-            continue
         if choice == "setup":
             cfg = screen_setup(term, cfg)
             status = load_status(term, cfg, force=True) if cfg else {}
@@ -2125,7 +2047,6 @@ def main():
         return 2
 
     sync.STATE_DIR.mkdir(parents=True, exist_ok=True)
-    start_update_check()
     with Term() as term:
         return main_loop(term)
 

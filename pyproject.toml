@@ -33,7 +33,6 @@ skill-sync = "skill_sync.sync:main"
 skill-sync-menu = "skill_sync.menu:main"
 skill-sync-install = "skill_sync.install:main"
 skill-sync-hooks = "skill_sync.install_hooks:main"
-skill-sync-watch = "skill_sync.install_watch:main"
 skill-sync-provision = "skill_sync.provision:main"
 
 [tool.setuptools]

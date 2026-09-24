@@ -66,7 +66,7 @@ Remote layout:
   installed under `~/.gemini` is never duplicated into `~/.claude`.
 - **skill-sync does not sync itself** — it would be uploading the tool mid-upload, and a
   pull could replace the running code underneath it. It is excluded from `push`, `pull` and
-  the Stop hook, and updates from GitHub via `update`.
+  the Stop hook. It is updated by reinstalling it, never by downloading code itself.
 
 ## Usage
 
@@ -123,18 +123,10 @@ Both no-op until `setup` has run and never fail a session. `--uninstall` removes
 A skill with no entry in `state.json` has never synced anywhere, and is never uploaded
 silently:
 
-- `install_watch.py` starts `watch_new_skills.py` at login (Startup folder on Windows, a
-  LaunchAgent on macOS, a systemd `--user` unit or XDG autostart entry on Linux — no admin
-  or root anywhere). It polls every few seconds, waits for a new skill's files to stop
-  changing, then runs the same check `hook-stop` does. It is **opt-in**: nothing installs
-  it unless the user asks, including `install.py`, which needs `--watch`. An autostart
-  entry is the most malware-shaped thing here, so it never appears as a side effect.
-- That watcher, or the next `hook-stop`, opens a separate console running
+- The next `hook-stop` opens a separate console running
   `sync.py confirm-new`: one y/n prompt per new skill, with its description. Yes pushes it;
   no — or ignoring the window — means it will not ask again unless the skill changes.
 - Run it by hand anytime: `python scripts/sync.py confirm-new`.
-- `python scripts/install_watch.py --uninstall` removes the watcher; the Stop hook still
-  covers new skills on the next session either way.
 
 ## Safety model
 
@@ -158,7 +150,6 @@ silently:
 - `scripts/menu.py` — interactive terminal menu (needs a real TTY).
 - `scripts/install.py` — one-shot installer: rclone, a default remote, categories, hooks.
 - `scripts/install_hooks.py` — installs/removes the session hooks.
-- `scripts/install_watch.py`, `scripts/watch_new_skills.py` — new-skill watcher.
 - `scripts/launch.cmd`, `scripts/launch.sh` — find or install Python, then run a script.
 - `scripts/get_python.ps1` — pinned, checksum-verified Python download (Windows fallback).
 - `scripts/provision.py` — installs rclone, package manager first, verified download second.

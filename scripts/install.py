@@ -8,13 +8,8 @@ One-command setup:
 3. Auto-configures skill categories (work, school, personal).
 4. Registers session hooks in Claude Code settings.
 
-The login watcher is *not* installed unless it is asked for with --watch. It is the one
-piece that survives a reboot, and something that plants an autostart entry as a side
-effect of "install" is exactly what a security review should object to. The Stop hook
-already covers new skills on the next session.
-
 Usage:
-    python scripts/install.py [--watch] [--no-hooks]
+    python scripts/install.py [--no-hooks]
 """
 
 from __future__ import annotations
@@ -33,7 +28,6 @@ except Exception:
 HERE = Path(__file__).resolve().parent
 SYNC_SCRIPT = HERE / "sync.py"
 HOOKS_SCRIPT = HERE / "install_hooks.py"
-WATCH_INSTALLER = HERE / "install_watch.py"
 HOME = Path.home()
 
 
@@ -112,21 +106,9 @@ def install_hooks():
         log(f"Failed to install hooks: {e}")
 
 
-def install_watcher():
-    log("Installing background watcher (asks about a new skill within seconds, "
-        "not on the next Claude Code turn)...")
-    try:
-        subprocess.run([sys.executable, str(WATCH_INSTALLER)], check=True)
-    except Exception as e:
-        log(f"Watcher install note (non-fatal, hooks still cover it on the next "
-            f"Claude Code session): {e}")
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--watch", action="store_true",
-                        help="also start the new-skill watcher at login (autostart entry)")
     parser.add_argument("--no-hooks", action="store_true",
                         help="do not register the Claude Code session hooks")
     args = parser.parse_args(argv)
@@ -144,15 +126,10 @@ def main(argv=None):
     auto_configure_skill_sync(remote)
     if not args.no_hooks:
         install_hooks()
-    if args.watch:
-        install_watcher()
 
     log("\n🎉 SETUP COMPLETE!")
     log("skill-sync is configured and ready to use.")
     log("Optional: To connect to Google Drive or Dropbox later, run `rclone config`.")
-    if not args.watch:
-        log("Optional: `python scripts/install_watch.py` asks about a new skill within "
-            "seconds instead of on the next Claude Code turn. It adds a login item.")
 
 
 if __name__ == "__main__":

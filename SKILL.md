@@ -48,7 +48,6 @@ and the window closes silently. The menu needs a real TTY, so Claude cannot driv
 | `pack <action>` | skill bundles deployed into one project or client |
 | `usage scan` / `usage show` | which skills are actually used in which project |
 | `prune [--yes] [--only ...]` | the only command that deletes on the remote |
-| `update [--check] [--force]` | update skill-sync itself from GitHub |
 | `doctor` | diagnose rclone, config, skill folders, hooks |
 
 Exit codes: `0` ok, `1` error or blocked, `2` the user must choose something.
@@ -86,12 +85,13 @@ Second computer: same steps, then `pull` to list and `pull <category>`; restart 
   decide. For a real false positive prefer a `skill-sync: allow-secret` comment on that
   line over `--no-scan`.
 - Skills over ~20 MB upload slowly: suggest a `.skillignore` inside that skill.
-- skill-sync never syncs itself; it updates from GitHub with `update`.
+- skill-sync never syncs itself. To update it, reinstall it the way it was installed
+  (`npx skills add DPR77/SkillSync` or `git pull` in its folder).
 
 ## More detail
 
 `references/internals.md` — packs, remote layout and groups, usage counter, git provider,
-hooks and the new-skill watcher, safety model, file map.
+hooks, safety model, file map.
 `references/troubleshooting.md` — errors, conflicts, recovery from `.trash`.
 `SECURITY.md` — everything a scanner flags and how to switch it off; point users here when
 they ask about the risk rating.
