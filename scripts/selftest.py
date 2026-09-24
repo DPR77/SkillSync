@@ -73,6 +73,18 @@ def powershell_runs(command: str, root: Path) -> bool:
     return done.returncode == 0 and "ParserError" not in (done.stderr or "")
 
 
+def bash_runs(command: str) -> bool:
+    """Run a hook command through bash, which Claude Code uses on Windows when Git Bash exists."""
+    shell = shutil.which("bash")
+    if not shell:
+        return True
+    try:
+        done = subprocess.run([shell, "-c", command], capture_output=True, text=True, timeout=180)
+    except Exception:
+        return False
+    return done.returncode == 0
+
+
 def menu_visible_len(line: str) -> int:
     """menu.py's own width calculation, so the UI checks measure what it measures."""
     import importlib.util
@@ -480,22 +492,23 @@ def main() -> int:
         check("a stub that exits non-zero is rejected, not written into the hook",
               not ih.is_interpreter(str(fake_python_stub(root))))
 
+        spaced_dir = root / "dir with space"
+        spaced_dir.mkdir(exist_ok=True)
         real_python_exe = ih.python_exe
         try:
-            ih.python_exe = lambda: "C:/Program Files/Python311/python.exe"
+            ih.python_exe = lambda: str(spaced_dir)
             spaced = ih.hook_command("hook-stop")
         finally:
             ih.python_exe = real_python_exe
         plain = ih.hook_command("hook-stop")
+        check("the hook never needs PowerShell's call operator", not spaced.startswith("&"), spaced)
         if os.name == "nt":
-            check("an interpreter path with spaces is called, not just quoted",
-                  spaced.startswith('& "'), spaced)
-            check("a path without spaces needs no call operator",
-                  not plain.startswith("&"), plain)
-            check("the generated hook actually parses and runs in PowerShell",
+            check("an interpreter path with spaces is shortened, not quoted",
+                  not spaced.startswith('"') or ih.short_path(str(spaced_dir)) == str(spaced_dir),
+                  spaced)
+            check("the generated hook parses and runs in PowerShell",
                   powershell_runs(plain, root), plain)
-        else:
-            check("the call operator is Windows-only", not spaced.startswith("&"), spaced)
+            check("the generated hook runs in Git Bash", bash_runs(plain), plain)
 
     finally:
         failed = [r for r in results if r[0] == FAIL]

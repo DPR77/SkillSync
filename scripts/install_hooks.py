@@ -73,18 +73,32 @@ def quote(s: str) -> str:
     return f'"{s_posix}"' if " " in s_posix else s_posix
 
 
+def short_path(path: str) -> str:
+    """The 8.3 form of a Windows path, which has no spaces, or the path unchanged.
+
+    A quoted path is read differently by the two shells Claude Code runs hooks with on
+    Windows: Git Bash runs it, PowerShell parses a leading quoted string as an expression
+    and fails. The call operator fixes PowerShell but is a syntax error in bash. A path
+    with no spaces needs no quotes, so it works in both. Volumes with 8.3 names disabled
+    return the long path, which is then quoted as before.
+    """
+    if os.name != "nt" or " " not in path:
+        return path
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(Path(path)), buf, len(buf))
+        if 0 < n < len(buf) and " " not in buf.value:
+            return Path(buf.value).as_posix()
+    except Exception:
+        pass
+    return path
+
+
 def hook_command(subcommand: str) -> str:
-    exe = quote(python_exe())
-    script = quote(SYNC_SCRIPT.as_posix())
-    command = f"{exe} {script} {subcommand} --quiet"
-    # Claude Code runs hooks through PowerShell on Windows, and there a line that starts
-    # with a quoted path is a string expression, not a command: the interpreter runs and
-    # the arguments after the closing quote are an "unexpected token" ParserError. The
-    # call operator turns it back into a command. Anyone whose Python lives under
-    # "C:\Program Files" or a user name with a space hit this on every session.
-    if os.name == "nt" and exe.startswith('"'):
-        command = f"& {command}"
-    return command
+    exe = quote(short_path(python_exe()))
+    script = quote(short_path(SYNC_SCRIPT.as_posix()))
+    return f"{exe} {script} {subcommand} --quiet"
 
 
 def is_ours(entry: dict) -> bool:
