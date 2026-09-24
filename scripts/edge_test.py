@@ -20,6 +20,11 @@ HERE = Path(__file__).resolve().parent
 SYNC = HERE / "sync.py"
 
 def run_test():
+    sys.path.insert(0, str(HERE))
+    import sync as sync_mod
+    if not sync_mod.rclone_bin(required=False):
+        print("SKIP: rclone is not installed, this test cannot run.")
+        return 2
     temp_dir = Path(tempfile.mkdtemp(prefix="skill-sync-edge-"))
     skills_dir = temp_dir / "skills"
     state_dir = temp_dir / "state"
@@ -149,4 +154,4 @@ def run_test():
         pass
 
 if __name__ == "__main__":
-    run_test()
+    sys.exit(run_test() or 0)

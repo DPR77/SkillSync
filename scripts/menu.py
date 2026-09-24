@@ -283,7 +283,6 @@ def clip(s: str, width: int) -> str:
     s = deco(s)
     if visible_len(s) <= width:
         return s
-    global ANSI_RE
     out, count = [], 0
     i = 0
     while i < len(s) and count < width:
@@ -924,7 +923,6 @@ def screen_group_detail(term, cfg, status, group_name):
             term.read_key()
             continue
 
-        g = G.g
         rows = [f"{C.green(n)} {C.dim('joins')} {group_name}   "
                 f"{C.dim('(now: ' + ', '.join(sorted(set(_groups(status[n]) + [group_name]))) + ')')}"
                 for n in add]
@@ -1015,7 +1013,6 @@ def screen_groups(term, cfg, status):
                         cats = list(cfg.get("categories") or [])
                 elif choice.startswith("⚠"):
                     # Assign ungrouped skills
-                    items = to_items(status, ungrouped)
                     cat_items = [{"key": c} for c in cats] + [{"key": "+ new group ..."}]
                     cat_picker = Picker(cat_items, lambda it, ch: it["key"],
                                         "Assign ungrouped skills to group", single=True)
@@ -1237,7 +1234,7 @@ def screen_pack_detail(term, cfg, status, name):
             project = ask_project(term, cfg, "inspect")
             if project is False:
                 continue
-            run_action(term, f"pack where", lambda: sync.cmd_pack(
+            run_action(term, "pack where", lambda: sync.cmd_pack(
                 pack_args("where", project=project)))
         elif key == "p":
             run_action(term, "pack publish", lambda: sync.cmd_pack(pack_args("publish")))
@@ -1391,7 +1388,6 @@ def screen_prune(term, cfg, status):
 def screen_setup(term, cfg):
     import subprocess as _sp
     exe = sync.rclone_bin(required=False)
-    g = G.g
     width = min(term_size()[0], 100)
     hr = "─" * width
 

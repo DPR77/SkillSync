@@ -433,7 +433,7 @@ def rclone_candidates():
     where provision.py puts the copy it downloads when no package manager is available.
     """
     exe = "rclone.exe" if os.name == "nt" else "rclone"
-    paths = [STATE_DIR / "bin" / exe]
+    paths = [STATE_DIR / "bin" / exe, HOME / ".claude" / "skill-sync" / "bin" / exe]
     if os.name == "nt":
         local = Path(os.environ.get("LOCALAPPDATA") or (HOME / "AppData" / "Local"))
         paths.append(local / "Microsoft" / "WinGet" / "Links" / exe)
@@ -1379,7 +1379,7 @@ def cmd_setup(args):
     print(f"Machine     : {cfg['machine']}")
     print(f"Skills dir  : {SKILLS_DIR}")
     if code != 0:
-        print(f"\nNote: could not list the remote yet (it will be created on first push).")
+        print("\nNote: could not list the remote yet (it will be created on first push).")
         print("  " + err.strip().splitlines()[-1][:200] if err.strip() else "")
     print("\nNext: python sync.py status")
     return 0

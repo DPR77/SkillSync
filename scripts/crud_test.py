@@ -638,6 +638,9 @@ def test_concurrent_pushes_lock_exercised(root):
           f"exception instead of the intended SyncError - see full output below\n"
           + "\n---\n".join(outs))
 
+    check("a push that lost the race failed only because of the lock",
+          codes.count(0) == 2 or blocked_seen, str(outs)[:600])
+
     try:
         manifest = remote_manifest(remote)
         manifest_ok = "psi" in manifest.get("skills", {})
@@ -655,12 +658,18 @@ def test_concurrent_pushes_lock_exercised(root):
 
 # ======================================================================== main ====
 
+def sync_rclone():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import sync
+    return sync.rclone_bin(required=False)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep", action="store_true", help="keep the temp directory")
     args = ap.parse_args()
 
-    if not shutil.which("rclone"):
+    if not sync_rclone():
         print("SKIP: rclone is not installed, this test cannot run.")
         print("  Windows: winget install Rclone.Rclone")
         return 2
