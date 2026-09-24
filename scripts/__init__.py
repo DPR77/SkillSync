@@ -6,4 +6,4 @@ exists so the same folder can also be installed as the `skill_sync` package, giv
 `skill-sync*` console commands declared in pyproject.toml.
 """
 
-__all__ = ["sync", "menu", "install", "install_hooks", "platform_scanner"]
+__all__ = ["sync", "sync_core", "sync_remote", "sync_scan", "sync_usage", "sync_packs", "menu", "install", "install_hooks", "platform_scanner"]

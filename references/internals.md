@@ -146,7 +146,12 @@ silently:
 
 ## Files
 
-- `scripts/sync.py` — all sync logic.
+- `scripts/sync.py` — entry point: commands, hooks and the CLI. Re-exports the modules below.
+- `scripts/sync_core.py` — constants, paths, config/state files, logging, locking, progress.
+- `scripts/sync_remote.py` — rclone, the git provider, `manifest.json`.
+- `scripts/sync_scan.py` — skill discovery, ignore rules, hashing, status, pre-push guards.
+- `scripts/sync_usage.py` — the usage counter.
+- `scripts/sync_packs.py` — packs and `place`.
 - `scripts/menu.py` — interactive terminal menu (needs a real TTY).
 - `scripts/install.py` — one-shot installer: rclone, a default remote, categories, hooks.
 - `scripts/install_hooks.py` — installs/removes the session hooks.

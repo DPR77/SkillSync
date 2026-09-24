@@ -37,7 +37,8 @@ import sync  # noqa: E402  (local module, env and path set above)
 PROJECTS = ROOT / "projects"
 PROJECT_DIR = PROJECTS / "C--dev-demo"
 PROJECT_DIR.mkdir(parents=True)
-sync.CLAUDE_PROJECTS_DIR = PROJECTS
+import sync_usage  # noqa: E402
+sync_usage.CLAUDE_PROJECTS_DIR = PROJECTS
 sync.STATE_DIR.mkdir(parents=True, exist_ok=True)
 sync.save_json(sync.CONFIG_FILE, {"remote": str(ROOT / "remote"), "root": "R",
                                   "categories": ["work"], "default_category": "work",
