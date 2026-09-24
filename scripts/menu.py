@@ -19,7 +19,6 @@ import argparse
 import os
 import shutil
 import sys
-import threading
 import time
 from argparse import Namespace
 from pathlib import Path
@@ -283,7 +282,6 @@ def clip(s: str, width: int) -> str:
     s = deco(s)
     if visible_len(s) <= width:
         return s
-    global ANSI_RE
     out, count = [], 0
     i = 0
     while i < len(s) and count < width:
@@ -404,9 +402,6 @@ def header(cfg, summary=None, width=None):
         if os.environ.get("SKILL_SYNC_HOME"):
             lines.append("  " + C.yellow(
                 f"SKILL_SYNC_HOME is set to {os.environ['SKILL_SYNC_HOME']}"))
-    notice = update_notice()
-    if notice:
-        lines.append("  " + C.yellow(notice))
     if summary:
         lines.append("  " + summary)
     lines.append("")
@@ -630,34 +625,6 @@ def load_status(term, cfg, force=False, cache={}):
         term.raw()
     cache["data"], cache["at"] = data, time.time()
     return data
-
-
-UPDATE_STATE = {"latest": None, "newer": False, "done": False, "reason": None}
-
-
-def start_update_check():
-    """Ask GitHub about a newer release without making the user wait for it.
-
-    Runs once, in a daemon thread, so a slow or blocked network costs the menu nothing:
-    the notice simply appears on a later frame, or never.
-    """
-    def work():
-        try:
-            latest, newer, reason = sync.update_available()
-            UPDATE_STATE.update(latest=latest, newer=newer, reason=reason)
-        except Exception:
-            pass                                   # a version check never breaks the menu
-        finally:
-            UPDATE_STATE["done"] = True
-
-    threading.Thread(target=work, daemon=True).start()
-
-
-def update_notice():
-    if not UPDATE_STATE["newer"]:
-        return None
-    return (f"⬆  skill-sync {UPDATE_STATE['latest']} is available "
-            f"(you have {sync.local_version()}) - open  Update")
 
 
 ORIGIN_WIDTH = 9
@@ -924,7 +891,6 @@ def screen_group_detail(term, cfg, status, group_name):
             term.read_key()
             continue
 
-        g = G.g
         rows = [f"{C.green(n)} {C.dim('joins')} {group_name}   "
                 f"{C.dim('(now: ' + ', '.join(sorted(set(_groups(status[n]) + [group_name]))) + ')')}"
                 for n in add]
@@ -1015,7 +981,6 @@ def screen_groups(term, cfg, status):
                         cats = list(cfg.get("categories") or [])
                 elif choice.startswith("⚠"):
                     # Assign ungrouped skills
-                    items = to_items(status, ungrouped)
                     cat_items = [{"key": c} for c in cats] + [{"key": "+ new group ..."}]
                     cat_picker = Picker(cat_items, lambda it, ch: it["key"],
                                         "Assign ungrouped skills to group", single=True)
@@ -1237,7 +1202,7 @@ def screen_pack_detail(term, cfg, status, name):
             project = ask_project(term, cfg, "inspect")
             if project is False:
                 continue
-            run_action(term, f"pack where", lambda: sync.cmd_pack(
+            run_action(term, "pack where", lambda: sync.cmd_pack(
                 pack_args("where", project=project)))
         elif key == "p":
             run_action(term, "pack publish", lambda: sync.cmd_pack(pack_args("publish")))
@@ -1391,7 +1356,6 @@ def screen_prune(term, cfg, status):
 def screen_setup(term, cfg):
     import subprocess as _sp
     exe = sync.rclone_bin(required=False)
-    g = G.g
     width = min(term_size()[0], 100)
     hr = "─" * width
 
@@ -1441,9 +1405,13 @@ def screen_setup(term, cfg):
             lines += [f"  {C.bold('i')} {C.dim('install it now')}   "
                       f"{C.dim('runs')} {C.cyan(shown)}"]
         else:
-            lines += ["  " + C.dim("run this yourself, it needs root:"),
+            lines += ["  " + C.dim("no unprivileged package manager here; this needs root:"),
                       "      " + C.cyan(shown), ""]
         lines += [
+            f"  {C.bold('d')} {C.dim('download it')}   "
+            f"{C.dim('official build from downloads.rclone.org, checksum-verified,')}",
+            f"      {C.dim('unpacked into')} {C.cyan(str(sync.STATE_DIR / 'bin'))} "
+            f"{C.dim('- no admin, no package manager')}",
             f"  {C.bold('r')} {C.dim('re-check')}   "
             f"{C.dim('already installed? this looks again, PATH and all')}",
             f"  {C.bold('esc')} {C.dim('back')}",
@@ -1457,6 +1425,10 @@ def screen_setup(term, cfg):
             return cfg
         if key == "i" and argv:
             run_action(term, shown, lambda a=argv: _sp.run(a, check=False))
+        elif key == "d":
+            import provision
+            run_action(term, "download rclone from downloads.rclone.org",
+                       lambda: provision.install_rclone(force=True))
         elif key != "r":
             continue
         exe = sync.rclone_bin(required=False)
@@ -1731,7 +1703,6 @@ def screen_doctor(term, cfg):
 # Format: (key, icon, text_label, description)
 # Icon and text are separated so padding is applied only to pure ASCII text.
 MENU = [
-    ("update",    "⬆", "Update",         "Fetch the latest skill-sync from GitHub"),
     ("status",    "📊", "Status",        "Inspect local vs cloud skill differences"),
     ("push",      "📤", "Upload",         "Send changed skills to cloud remote"),
     ("pull",      "📥", "Download",       "Bring skill groups onto this computer"),
@@ -1864,48 +1835,6 @@ def status_screen(term, cfg, status):
         status = load_status(term, cfg, force=True)
 
 
-def screen_update(term, cfg):
-    """Show installed vs published, then update on confirmation."""
-    term.draw(header(cfg) + ["  " + C.dim("asking GitHub for the published version ...")])
-    try:
-        latest, newer, reason = sync.update_available(force=True, timeout=8)
-    except Exception as e:
-        latest, newer, reason = None, False, f"{e.__class__.__name__}: {e}"
-    log_line = C.yellow(reason) if (latest is None and reason) else None
-    UPDATE_STATE.update(latest=latest, newer=newer, reason=reason, done=True)
-
-    installed = sync.local_version()
-    lines = header(cfg) + [
-        "  " + C.bold("Update skill-sync"), "",
-        f"    installed   {C.bold(installed)}",
-        f"    published   {C.bold(latest or C.dim('unknown'))}",
-        f"    source      {C.dim(sync.REPO_URL)}",
-        "",
-    ]
-    if log_line:
-        lines += ["  " + log_line, "", C.dim("  press any key")]
-        term.draw(lines)
-        term.read_key()
-        return
-    if not newer:
-        lines += ["  " + C.green("You are on the latest version."), "",
-                  C.dim("  press any key")]
-        term.draw(lines)
-        term.read_key()
-        return
-
-    if not confirm(term, cfg, f"Update skill-sync {installed} -> {latest}",
-                   [f"downloads {sync.ARCHIVE_URL}",
-                    "overwrites this skill's files",
-                    "keeps a full backup of the current version first"],
-                   note="Your remote, config and synced skills are untouched. Restart the "
-                        "menu afterwards so the new code is loaded."):
-        return
-    run_action(term, f"update to {latest}",
-               lambda: sync.cmd_update(Namespace(check=False, force=False)))
-    UPDATE_STATE.update(newer=False)
-
-
 def main_loop(term):
     cursor = 0
     cfg = sync.load_config()
@@ -1942,9 +1871,6 @@ def main_loop(term):
         choice = MENU[cursor][0]
         if choice == "quit":
             return 0
-        if choice == "update":
-            screen_update(term, cfg)
-            continue
         if choice == "setup":
             cfg = screen_setup(term, cfg)
             status = load_status(term, cfg, force=True) if cfg else {}
@@ -2121,7 +2047,6 @@ def main():
         return 2
 
     sync.STATE_DIR.mkdir(parents=True, exist_ok=True)
-    start_update_check()
     with Term() as term:
         return main_loop(term)
 

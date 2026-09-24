@@ -72,22 +72,28 @@ it picks the storage, creates the categories and registers the hooks.
 **macOS / Linux**
 
 ```bash
-python3 scripts/install.py
+sh scripts/launch.sh install.py
 ```
 
 **Windows**
 
 ```powershell
-python scripts\install.py
+scripts\launch.cmd install.py
 ```
 
-Requires Python 3.8+. The installer fetches [rclone](https://rclone.org) through your
-platform's package manager if it is missing (`winget`, `brew`, or the official script),
-picks up your first existing rclone remote — or falls back to a local folder at
-`~/CloudSkills` so you can start with no cloud account at all — creates the `work`,
-`school`, `personal` categories, registers the session hooks, and installs a small
-background watcher (see below) so a brand-new skill gets noticed within seconds
-instead of on the next Claude Code turn.
+**No Python? No admin rights? Nothing to do.** The launcher finds a working Python and
+installs one for your user if there is none — `winget --scope user` first, and if that is
+not available, the official embeddable build from python.org, pinned by SHA-256. (On
+Windows this is also what stops the Store stub from swallowing the command: a bare
+`python` on a clean install opens the Microsoft Store and runs nothing.) If you already
+have Python, `python scripts/install.py` works exactly as before.
+
+The installer then fetches [rclone](https://rclone.org) the same way — `winget` or `brew`
+if you have them, otherwise the official build straight from `downloads.rclone.org`,
+verified against the checksum the rclone project publishes and unpacked into
+`~/.claude/skill-sync/bin`. It picks up your first existing rclone remote — or falls back
+to a local folder at `~/CloudSkills` so you can start with no cloud account at all —
+creates the `work`, `school`, `personal` categories and registers the session hooks.
 
 <details>
 <summary><b>Install it as a command instead of a folder of scripts</b></summary>
@@ -99,8 +105,8 @@ and the other clients load it. If you would rather have `skill-sync` on your `PA
 pip install git+https://github.com/DPR77/SkillSync   # or: pip install . from a clone
 ```
 
-That gives you `skill-sync`, `skill-sync-menu`, `skill-sync-install`, `skill-sync-hooks`
-and `skill-sync-watch`, each doing exactly what the matching script does:
+That gives you `skill-sync`, `skill-sync-menu`, `skill-sync-install` and
+`skill-sync-hooks`, each doing exactly what the matching script does:
 
 ```bash
 skill-sync doctor
@@ -122,7 +128,6 @@ by hand:
 rclone config                                     # create a remote, interactively
 python scripts/sync.py setup --remote gdrive: --categories work,school,personal
 python scripts/install_hooks.py                   # optional, enables automatic sync
-python scripts/install_watch.py                   # optional, near-instant new-skill detection
 python scripts/sync.py doctor                     # confirm everything is wired up
 ```
 
@@ -231,7 +236,8 @@ never duplicated into `~/.claude`.
 > `categorize <skill> <group> --add` adds one, `--remove` takes one away.
 
 skill-sync excludes itself from `push` and `pull` — uploading the tool while it is running,
-or replacing its code mid-pull, is not worth the trouble. It updates from GitHub instead.
+or replacing its code mid-pull, is not worth the trouble. Update it by reinstalling it (`npx skills add DPR77/SkillSync`
+or `git pull` in its folder).
 
 ---
 
@@ -250,17 +256,9 @@ or replacing its code mid-pull, is not worth the trouble. It updates from GitHub
 5. **Repeat, automatically — but ask about brand-new skills.** Edits to a skill that has
    synced before auto-upload, within a 90-second budget, smallest first, so nothing is ever
    held up waiting on a slow link. A skill that has never been synced anywhere is different:
-   nothing pushes it silently. Instead, a background watcher (`watch_new_skills.py`, started
-   at login by `install_watch.py` — Startup-folder launcher on Windows, a LaunchAgent on
-   macOS, a systemd `--user` unit or XDG autostart entry on Linux, no admin/root needed
-   anywhere) polls every few seconds, waits for the new skill's files to stop changing
-   (installers write several at once), and opens a separate console window
-   (`sync.py confirm-new`) listing it with a real y/n prompt. Say yes and it pushes that
-   skill; say no, or ignore the window, and it simply won't ask again for that skill unless
-   it changes further — push it manually anytime with `sync.py confirm-new` or
-   `sync.py push <name>`. The same brand-new-vs-already-tracked split is checked by the
-   Claude Code `Stop` hook too, so it's covered even on a machine where the watcher isn't
-   running yet.
+   nothing pushes it silently: the Claude Code `Stop` hook opens a separate console window
+   (`sync.py confirm-new`) with a y/n prompt per new skill. Say yes and it pushes that skill;
+   say no, or ignore the window, and it will not ask again unless the skill changes.
 
 ---
 
@@ -281,6 +279,18 @@ or replacing its code mid-pull, is not worth the trouble. It updates from GitHub
   your cloud quota. `doctor` reports how much is held.
 - **No credentials of ours.** Cloud tokens live in rclone's config; skill-sync stores only
   the remote's name.
+- **Verified downloads.** The tools skill-sync installs for you are fetched over HTTPS from
+  their own project's servers and checked against a published SHA-256. A mismatch installs
+  nothing.
+- **Nothing at login, no self-update.** skill-sync installs no autostart entry and never
+  downloads its own code; it only runs when you or a Claude Code hook call it.
+- **The remote index is untrusted input.** `manifest.json` is sanitised on read: unsafe
+  skill names are dropped, control and bidi characters stripped, text length capped.
+
+Automated scanners may still flag skill-sync — it reaches the network, runs installers and edits `settings.json`, which is the same shape as
+software you would not want. [**SECURITY.md**](SECURITY.md) is the full inventory: every
+host contacted, every file written outside your skills folders, and the command to turn
+each behaviour off. Read it before you point this at an account you care about.
 
 ---
 

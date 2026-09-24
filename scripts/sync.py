@@ -112,9 +112,6 @@ FPCACHE_FILE = STATE_DIR / "fpcache.json"
 SELF_NAME = "skill-sync"
 REPO = "DPR77/SkillSync"
 REPO_URL = f"https://github.com/{REPO}"
-VERSION_URL = f"https://raw.githubusercontent.com/{REPO}/main/VERSION"
-ARCHIVE_URL = f"{REPO_URL}/archive/refs/heads/main.zip"
-UPDATE_CHECK_INTERVAL = 24 * 3600
 VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
 
 MANIFEST_NAME = "manifest.json"        # legacy single-file manifest, migrated on first write
@@ -429,10 +426,11 @@ def rclone_candidates():
 
     winget, Homebrew and Scoop all extend PATH for *future* shells, so a terminal that was
     already open when rclone was installed reports it missing - and the menu then sent
-    people off to install something they already had.
+    people off to install something they already had. The state dir comes first: that is
+    where provision.py puts the copy it downloads when no package manager is available.
     """
     exe = "rclone.exe" if os.name == "nt" else "rclone"
-    paths = []
+    paths = [STATE_DIR / "bin" / exe, HOME / ".claude" / "skill-sync" / "bin" / exe]
     if os.name == "nt":
         local = Path(os.environ.get("LOCALAPPDATA") or (HOME / "AppData" / "Local"))
         paths.append(local / "Microsoft" / "WinGet" / "Links" / exe)
@@ -468,7 +466,9 @@ def rclone_bin(required=True, _cache={}):
                     continue
     if not exe and required:
         raise SyncError(
-            "rclone was not found. Install it, then run `rclone config`:\n"
+            "rclone was not found. skill-sync can install it for you, no admin needed:\n"
+            "  python scripts/provision.py rclone\n"
+            "Or install it yourself, then run `rclone config`:\n"
             "  Windows: winget install Rclone.Rclone\n"
             "  macOS:   brew install rclone\n"
             "  Linux:   sudo apt install rclone | sudo dnf install rclone\n"
@@ -823,6 +823,46 @@ def read_legacy_manifest(cfg):
         return {}
 
 
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u202a-\u202e\u2066-\u2069]")
+MANIFEST_TEXT_MAX = 2000
+
+
+def _clean_remote_value(v, depth=0):
+    """Remote-authored data, reduced to plain values: no control or bidi characters, no
+    runaway strings or nesting. The manifest is written by other machines and read back
+    into terminal output and agent context, so it is treated as untrusted input."""
+    if depth > 6:
+        return None
+    if isinstance(v, str):
+        return _CONTROL_RE.sub("", v)[:MANIFEST_TEXT_MAX]
+    if isinstance(v, bool) or v is None or isinstance(v, (int, float)):
+        return v
+    if isinstance(v, list):
+        return [_clean_remote_value(x, depth + 1) for x in v[:500]]
+    if isinstance(v, dict):
+        return {str(k)[:200]: _clean_remote_value(x, depth + 1) for k, x in list(v.items())[:500]}
+    return None
+
+
+def safe_remote_skill_name(name) -> bool:
+    return (isinstance(name, str) and 0 < len(name) <= 200 and name not in (".", "..")
+            and not any(c in name for c in "/\\:") and not _CONTROL_RE.search(name))
+
+
+def sanitize_manifest(m):
+    if not isinstance(m, dict):
+        raise SyncError(f"remote {MANIFEST_NAME} is not a JSON object; fix or delete it")
+    m = _clean_remote_value(m)
+    skills = {}
+    for name, entry in (m.get("skills") or {}).items() if isinstance(m.get("skills"), dict) else []:
+        if safe_remote_skill_name(name) and isinstance(entry, dict):
+            skills[name] = entry
+        else:
+            log(f"ignoring unsafe manifest entry {name!r}")
+    m["skills"] = skills
+    return m
+
+
 def read_split_manifest(cfg):
     """Entries from a manifest.d/ directory, if a previous version left one behind."""
     tmp = Path(tempfile.mkdtemp(prefix="skill-sync-manifest-"))
@@ -861,12 +901,11 @@ def read_manifest(cfg):
             except json.JSONDecodeError:
                 raise SyncError(f"remote {MANIFEST_NAME} is corrupt at "
                                 f"{rpath(cfg, MANIFEST_NAME)}; fix or delete it before syncing")
-            m.setdefault("skills", {})
-            return m
+            return sanitize_manifest(m)
         # No aggregate: rebuild from whatever the older layouts left behind.
         skills = dict(read_legacy_manifest(cfg))
         skills.update(read_split_manifest(cfg))
-    return {"version": 2, "skills": skills}
+    return sanitize_manifest({"version": 2, "skills": skills})
 
 
 def write_manifest(cfg, entries: dict, drop=(), packs=None):
@@ -1219,71 +1258,6 @@ def local_version() -> str:
         return "0"
 
 
-def _version_key(v: str):
-    """Compare 2.10.0 above 2.9.0, and never raise on something unparseable."""
-    parts = []
-    for chunk in re.split(r"[.\-+]", (v or "").strip().lstrip("vV")):
-        parts.append(int(chunk) if chunk.isdigit() else 0)
-    return tuple(parts + [0] * (4 - len(parts)))[:4]
-
-
-def fetch_latest_version(timeout=4):
-    """(version, reason). Version is None when it could not be read."""
-    import urllib.error
-    import urllib.request
-    import base64
-    import json
-
-    # Try GitHub API first (zero CDN caching delay)
-    api_url = f"https://api.github.com/repos/{REPO}/contents/VERSION"
-    try:
-        req = urllib.request.Request(api_url, headers={"User-Agent": "skill-sync", "Accept": "application/vnd.github.v3+json"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-            content = data.get("content", "")
-            text = base64.b64decode(content).decode("utf-8", "replace").strip()
-            if text:
-                return (text, None)
-    except Exception:
-        pass
-
-    # Fallback to raw VERSION URL
-    try:
-        url = f"{VERSION_URL}?_={int(time.time())}"
-        req = urllib.request.Request(url, headers={"User-Agent": "skill-sync", "Cache-Control": "no-cache"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            text = resp.read().decode("utf-8", "replace").strip()
-        return (text, None) if text else (None, "the published VERSION file is empty")
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None, f"no VERSION file published at {VERSION_URL} yet"
-        return None, f"GitHub answered {e.code}"
-    except Exception as e:
-        log(f"update check failed: {e!r}")
-        return None, f"could not reach GitHub ({e.__class__.__name__})"
-
-
-def update_available(force=False, timeout=4):
-    """(latest, is_newer, reason) using a cached answer, checked at most once a day."""
-    st = load_state()
-    cached = st.get("update_check") or {}
-    fresh = time.time() - float(cached.get("at") or 0) < UPDATE_CHECK_INTERVAL
-    reason = None
-    if not force and fresh and cached.get("latest"):
-        latest = cached["latest"]
-    else:
-        latest, reason = fetch_latest_version(timeout=timeout)
-        if latest:
-            st = load_state()
-            st["update_check"] = {"at": time.time(), "latest": latest}
-            save_json(STATE_FILE, st)
-        elif cached.get("latest"):
-            latest = cached["latest"]                # stale, but better than nothing
-    if not latest:
-        return None, False, reason
-    return latest, _version_key(latest) > _version_key(local_version()), reason
-
-
 # ------------------------------------------------------------------ commands
 
 def repo_slug(url: str) -> str:
@@ -1372,7 +1346,7 @@ def cmd_setup(args):
     print(f"Machine     : {cfg['machine']}")
     print(f"Skills dir  : {SKILLS_DIR}")
     if code != 0:
-        print(f"\nNote: could not list the remote yet (it will be created on first push).")
+        print("\nNote: could not list the remote yet (it will be created on first push).")
         print("  " + err.strip().splitlines()[-1][:200] if err.strip() else "")
     print("\nNext: python sync.py status")
     return 0
@@ -1442,7 +1416,7 @@ def cmd_push(args):
         to_push, skipped, conflicts, uncategorised = [], [], [], []
         if args.skills and any(is_self(n) for n in args.skills):
             skipped.append((SELF_NAME, f"managed from {REPO_URL}, not through the remote "
-                                       f"(python sync.py update)"))
+                                       f"(reinstall it to update)"))
         for name in targets:
             i = st.get(name)
             if not i or not i["local"]:
@@ -1623,7 +1597,7 @@ def cmd_pull(args):
         wanted = []
         for n in (args.skills or []):
             if is_self(n):
-                print(f"skipped {n}: managed from {REPO_URL} (python sync.py update)")
+                print(f"skipped {n}: managed from {REPO_URL} (reinstall it to update)")
             elif n not in remote_skills:
                 print(f"skipped {n}: not on the remote")
             elif n not in wanted:
@@ -2839,7 +2813,7 @@ def cmd_doctor(args):
         print(f"rclone         : {exe} ({out.splitlines()[0] if out else 'unknown'})")
     else:
         ok = False
-        print("rclone         : NOT FOUND  -> winget install Rclone.Rclone | brew install rclone")
+        print("rclone         : NOT FOUND  -> python scripts/provision.py rclone")
 
     if not cfg:
         ok = False
@@ -3168,8 +3142,26 @@ def cmd_confirm_new(args):
     return 0
 
 
+def remove_legacy_watcher():
+    """Delete the login item that versions before 2.5.0 could install. Its script is gone,
+    so a leftover entry would only fail at every login."""
+    name = "skill-sync-watch"
+    appdata = Path(os.environ.get("APPDATA") or (HOME / "AppData" / "Roaming"))
+    for f in (appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{name}.vbs",
+              HOME / "Library" / "LaunchAgents" / f"com.{name}.plist",
+              HOME / ".config" / "systemd" / "user" / f"{name}.service",
+              HOME / ".config" / "autostart" / f"{name}.desktop"):
+        try:
+            if f.is_file():
+                f.unlink()
+                log(f"removed legacy watcher entry {f}")
+        except OSError as e:
+            log(f"could not remove legacy watcher entry {f}: {e!r}")
+
+
 def cmd_hook_session_start(args):
     """One-line notice when the remote has skills this machine does not."""
+    remove_legacy_watcher()
     cfg = load_config()
     if not cfg or not rclone_bin(required=False):
         return 0
@@ -3209,76 +3201,6 @@ def cmd_hook_session_start(args):
         print(f"[skill-sync] remote has {' and '.join(parts)}. Run /skill-sync pull")
     return 0
 
-
-def cmd_update(args):
-    """Update skill-sync from GitHub with strict ZIP path traversal protection & input sanitization."""
-    current_ver = local_version()
-    print(f"Current skill-sync version: {current_ver}")
-    if getattr(args, "check", False):
-        print(f"Skill-sync repository: {REPO_URL}")
-        return 0
-
-    import urllib.request
-    import zipfile
-    import io
-
-    print(f"Fetching latest update from {ARCHIVE_URL}...")
-    req = urllib.request.Request(ARCHIVE_URL, headers={"User-Agent": "skill-sync-update/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status != 200:
-                raise SyncError(f"HTTP error {resp.status} fetching update")
-            content_bytes = resp.read()
-    except Exception as err:
-        raise SyncError(f"Failed to download update: {err}")
-
-    # Maximum allowed package size guard (25MB)
-    if len(content_bytes) > 25 * 1024 * 1024:
-        raise SyncError("Update package exceeds maximum allowed size limit (25 MB)")
-
-    target_dir = Path(__file__).resolve().parent.parent
-    try:
-        with zipfile.ZipFile(io.BytesIO(content_bytes)) as z:
-            names = z.namelist()
-            # Path Traversal Guard (prevent zip-slip / arbitrary code execution vulnerabilities)
-            for name in names:
-                parts = Path(name).parts
-                if ".." in parts or any(p.startswith("/") or p.startswith("\\") for p in parts):
-                    raise SyncError(f"Security error: invalid path traversal detected in archive entry '{name}'")
-            
-            with tempfile.TemporaryDirectory(prefix="skill-sync-update-") as tmp_extract:
-                # Extracted one member at a time, each resolved path checked against the
-                # destination, instead of extractall(). The guard above already rejects
-                # traversal, but extractall is the call auditors flag and there is no
-                # reason to keep it when the loop is this cheap.
-                base = Path(tmp_extract).resolve()
-                for member in z.infolist():
-                    out = (base / member.filename).resolve()
-                    if base != out and base not in out.parents:
-                        raise SyncError(f"Security error: archive entry escapes the "
-                                        f"extraction folder: '{member.filename}'")
-                    z.extract(member, tmp_extract)
-                extracted_items = list(Path(tmp_extract).iterdir())
-                if not extracted_items:
-                    raise SyncError("Update archive is empty")
-                root_sub = extracted_items[0]
-                if not (root_sub / "SKILL.md").exists():
-                    raise SyncError("Update archive missing mandatory SKILL.md")
-                
-                for item in root_sub.iterdir():
-                    dst = target_dir / item.name
-                    if item.is_dir():
-                        shutil.copytree(item, dst, dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(item, dst)
-    except zipfile.BadZipFile:
-        raise SyncError("Downloaded update is not a valid ZIP archive")
-
-    print(f"Successfully updated skill-sync at {target_dir}")
-    return 0
-
-
-# ---------------------------------------------------------------------- main
 
 def build_parser():
     p = argparse.ArgumentParser(
@@ -3455,11 +3377,6 @@ def build_parser():
     s = sub.add_parser("doctor", help="diagnose setup problems")
     s.add_argument("--json", action="store_true", help="machine readable output")
     s.set_defaults(func=cmd_doctor)
-
-    s = sub.add_parser("update", help=f"update skill-sync itself from {REPO_URL}")
-    s.add_argument("--check", action="store_true", help="only report whether one is available")
-    s.add_argument("--force", action="store_true", help="reinstall even if already current")
-    s.set_defaults(func=cmd_update)
 
     s = sub.add_parser("hook-stop", help="internal: auto-push when a session ends")
     s.add_argument("--quiet", action="store_true")

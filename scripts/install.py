@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """Zero-Friction Auto-Installer for skill-sync - Created by GTI Santander.
 
-Fully automatic 1-click setup:
-1. Installs rclone automatically if missing.
+One-command setup:
+1. Installs rclone if missing - package manager first, official checksum-verified
+   download second, so a machine with no admin rights is not a dead end.
 2. Auto-configures storage remote (uses default local cloud folder if no cloud remote exists yet).
 3. Auto-configures skill categories (work, school, personal).
 4. Registers session hooks in Claude Code settings.
 
 Usage:
-    python scripts/install.py
+    python scripts/install.py [--no-hooks]
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-import platform
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +28,6 @@ except Exception:
 HERE = Path(__file__).resolve().parent
 SYNC_SCRIPT = HERE / "sync.py"
 HOOKS_SCRIPT = HERE / "install_hooks.py"
-WATCH_INSTALLER = HERE / "install_watch.py"
 HOME = Path.home()
 
 
@@ -44,60 +41,28 @@ def check_python_version():
         sys.exit(1)
 
 
+sys.path.insert(0, str(HERE))
+import provision  # noqa: E402  (local module, path set above)
+
+
 def find_rclone():
-    """PATH first, then the folders winget, Scoop and Homebrew install into."""
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import sync
-        return sync.rclone_bin(required=False)
-    except Exception:
-        return shutil.which("rclone")
+    return provision.find_rclone()
 
 
 def ensure_rclone():
-    exe = find_rclone()
-    if exe:
-        log(f"rclone found: {exe}")
-        return True
-
-    system = platform.system().lower()
-    # Unprivileged package managers are run for the user; anything needing root is only
-    # printed. An installer that quietly calls sudo is both a security smell auditors
-    # flag and a hang waiting for a password prompt nobody sees.
-    unprivileged = {
-        "windows": ["winget", "install", "Rclone.Rclone", "--accept-source-agreements",
-                    "--accept-package-agreements"],
-        "darwin": ["brew", "install", "rclone"],
-    }.get(system)
-    if unprivileged:
-        log(f"rclone not found. Installing with: {' '.join(unprivileged)}")
-        try:
-            subprocess.run(unprivileged, check=True)
-        except Exception as e:
-            log(f"rclone installation failed: {e}")
-    else:
-        if shutil.which("apt-get"):
-            hint = "sudo apt-get install -y rclone"
-        elif shutil.which("dnf"):
-            hint = "sudo dnf install -y rclone"
-        elif shutil.which("pacman"):
-            hint = "sudo pacman -S rclone"
-        else:
-            hint = "install rclone with your package manager"
-        log(f"rclone is not installed. Run this yourself, it needs root:\n    {hint}")
-        return False
-
-    exe = find_rclone()
-    if exe:
-        log(f"rclone installed successfully: {exe}")
-        return True
-    log("rclone still not found. Open a new terminal so PATH picks it up, then rerun.")
-    return False
+    """Package manager if there is an unprivileged one, verified download otherwise."""
+    exe = provision.ensure_rclone(log=log)
+    if not exe:
+        log("rclone could not be installed automatically. Install it yourself, then rerun:")
+        log("    Windows: winget install Rclone.Rclone")
+        log("    macOS:   brew install rclone")
+        log("    Linux:   sudo apt install rclone | sudo dnf install rclone")
+    return bool(exe)
 
 
 def setup_zero_friction_remote() -> str:
     """Find an existing rclone remote, or automatically create a default local cloud storage folder."""
-    exe = shutil.which("rclone")
+    exe = provision.find_rclone()
     if exe:
         try:
             res = subprocess.run([exe, "listremotes"], capture_output=True, text=True, timeout=10)
@@ -141,17 +106,13 @@ def install_hooks():
         log(f"Failed to install hooks: {e}")
 
 
-def install_watcher():
-    log("Installing background watcher (asks about a new skill within seconds, "
-        "not on the next Claude Code turn)...")
-    try:
-        subprocess.run([sys.executable, str(WATCH_INSTALLER)], check=True)
-    except Exception as e:
-        log(f"Watcher install note (non-fatal, hooks still cover it on the next "
-            f"Claude Code session): {e}")
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--no-hooks", action="store_true",
+                        help="do not register the Claude Code session hooks")
+    args = parser.parse_args(argv)
 
-
-def main():
     print("""
 ╭──────────────────────────────────────────────────────────────────╮
 │  ╔═╗╦╔═╦╦  ╦    ╔═╗╦ ╦╔╗╔╔═╗                                     │
@@ -163,11 +124,11 @@ def main():
     ensure_rclone()
     remote = setup_zero_friction_remote()
     auto_configure_skill_sync(remote)
-    install_hooks()
-    install_watcher()
+    if not args.no_hooks:
+        install_hooks()
 
-    log("\n🎉 ZERO-FRICTION SETUP COMPLETE!")
-    log("skill-sync is 100% configured and ready to use.")
+    log("\n🎉 SETUP COMPLETE!")
+    log("skill-sync is configured and ready to use.")
     log("Optional: To connect to Google Drive or Dropbox later, run `rclone config`.")
 
 

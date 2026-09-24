@@ -2,6 +2,10 @@ include VERSION
 include LICENSE
 include README.md
 include SKILL.md
+include SECURITY.md
+include scripts/launch.cmd
+include scripts/launch.sh
+include scripts/get_python.ps1
 recursive-include references *.md
 prune references/images
 global-exclude __pycache__/*
