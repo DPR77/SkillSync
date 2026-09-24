@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -38,13 +40,29 @@ STOP_TIMEOUT = 120
 SESSION_TIMEOUT = 20
 
 
+def is_interpreter(exe: str) -> bool:
+    """True when the path actually runs Python, not just when it exists.
+
+    Windows puts App Execution Alias stubs for python.exe and python3.exe in
+    WindowsApps and they are always on PATH, whether or not Python was ever
+    installed from the Store. shutil.which finds one, but running it prints
+    "Python was not found" and exits non-zero, so a hook pointed at the stub
+    fails on every single session.
+    """
+    try:
+        return subprocess.run([exe, "-c", ""], capture_output=True,
+                              timeout=30).returncode == 0
+    except Exception:
+        return False
+
+
 def python_exe() -> str:
     """Interpreter to run the hook with, preferring a stable name over a venv path."""
     exe = Path(sys.executable)
     if "venv" in exe.parts or ".venv" in exe.parts:
         for candidate in ("python3", "python"):
             found = shutil.which(candidate)
-            if found:
+            if found and is_interpreter(found):
                 return Path(found).as_posix()
     return exe.as_posix()
 
@@ -55,9 +73,31 @@ def quote(s: str) -> str:
     return f'"{s_posix}"' if " " in s_posix else s_posix
 
 
+def short_path(path: str) -> str:
+    """The 8.3 form of a Windows path, which has no spaces, or the path unchanged.
+
+    A quoted path is read differently by the two shells Claude Code runs hooks with on
+    Windows: Git Bash runs it, PowerShell parses a leading quoted string as an expression
+    and fails. The call operator fixes PowerShell but is a syntax error in bash. A path
+    with no spaces needs no quotes, so it works in both. Volumes with 8.3 names disabled
+    return the long path, which is then quoted as before.
+    """
+    if os.name != "nt" or " " not in path:
+        return path
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(Path(path)), buf, len(buf))
+        if 0 < n < len(buf) and " " not in buf.value:
+            return Path(buf.value).as_posix()
+    except Exception:
+        pass
+    return path
+
+
 def hook_command(subcommand: str) -> str:
-    exe = quote(python_exe())
-    script = quote(SYNC_SCRIPT.as_posix())
+    exe = quote(short_path(python_exe()))
+    script = quote(short_path(SYNC_SCRIPT.as_posix()))
     return f"{exe} {script} {subcommand} --quiet"
 
 

@@ -28,6 +28,63 @@ HERE = Path(__file__).resolve().parent
 SYNC = HERE / "sync.py"
 
 
+def load_module(name: str):
+    """Import one of our scripts by path so its helpers can be tested directly."""
+    import importlib.util
+    key = f"_{name}_for_test"
+    module = sys.modules.get(key)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(key, HERE / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[key] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def fake_python_stub(root: Path) -> Path:
+    """A stand-in for Windows' App Execution Alias: on PATH, exits non-zero, runs nothing."""
+    if os.name == "nt":
+        stub = root / "fake-python.cmd"
+        stub.write_text("@echo Python was not found\r\n@exit /b 9009\r\n", encoding="utf-8")
+    else:
+        stub = root / "fake-python"
+        stub.write_text("#!/bin/sh\necho 'Python was not found'\nexit 9009\n", encoding="utf-8")
+        os.chmod(stub, 0o755)
+    return stub
+
+
+def powershell_runs(command: str, root: Path) -> bool:
+    """Run a hook command the way Claude Code does on Windows: through PowerShell.
+
+    A quoted interpreter path without the call operator is a ParserError there, which no
+    amount of checking the string for quotes would have caught.
+    """
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if not shell:
+        return True
+    script = root / "hook_probe.ps1"
+    script.write_text(command + "\n", encoding="utf-8")
+    try:
+        done = subprocess.run([shell, "-NoProfile", "-NonInteractive",
+                               "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                              capture_output=True, text=True, timeout=180)
+    except Exception:
+        return False
+    return done.returncode == 0 and "ParserError" not in (done.stderr or "")
+
+
+def bash_runs(command: str) -> bool:
+    """Run a hook command through bash, which Claude Code uses on Windows when Git Bash exists."""
+    shell = shutil.which("bash")
+    if not shell:
+        return True
+    try:
+        done = subprocess.run([shell, "-c", command], capture_output=True, text=True, timeout=180)
+    except Exception:
+        return False
+    return done.returncode == 0
+
+
 def menu_visible_len(line: str) -> int:
     """menu.py's own width calculation, so the UI checks measure what it measures."""
     import importlib.util
@@ -425,6 +482,33 @@ def main() -> int:
         commands = [h["command"] for g in data.get("hooks", {}).get("Stop", []) for h in g["hooks"]]
         check("uninstalling removes only our own hook",
               commands == ["echo skill-sync is great"], commands)
+
+        ih = load_module("install_hooks")
+        check("the interpreter written into the hook actually runs Python",
+              ih.is_interpreter(ih.python_exe()), ih.python_exe())
+        check("a real interpreter is recognised", ih.is_interpreter(sys.executable))
+        check("a path that does not exist is not an interpreter",
+              not ih.is_interpreter(str(root / "no-such-python")))
+        check("a stub that exits non-zero is rejected, not written into the hook",
+              not ih.is_interpreter(str(fake_python_stub(root))))
+
+        spaced_dir = root / "dir with space"
+        spaced_dir.mkdir(exist_ok=True)
+        real_python_exe = ih.python_exe
+        try:
+            ih.python_exe = lambda: str(spaced_dir)
+            spaced = ih.hook_command("hook-stop")
+        finally:
+            ih.python_exe = real_python_exe
+        plain = ih.hook_command("hook-stop")
+        check("the hook never needs PowerShell's call operator", not spaced.startswith("&"), spaced)
+        if os.name == "nt":
+            check("an interpreter path with spaces is shortened, not quoted",
+                  not spaced.startswith('"') or ih.short_path(str(spaced_dir)) == str(spaced_dir),
+                  spaced)
+            check("the generated hook parses and runs in PowerShell",
+                  powershell_runs(plain, root), plain)
+            check("the generated hook runs in Git Bash", bash_runs(plain), plain)
 
     finally:
         failed = [r for r in results if r[0] == FAIL]
